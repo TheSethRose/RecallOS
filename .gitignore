@@ -1,4 +1,5 @@
 # Node/Electron workspace
+models/
 node_modules/
 dist/
 out/
