@@ -1,0 +1,794 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RecallOS</title>
+    <style>
+      :root {
+        /* VS Code-inspired light theme */
+        --background: #fafafa;
+        --foreground: #333333;
+        --card: #ffffff;
+        --border: #e2e2e2;
+        --muted: #f3f3f3;
+        --muted-foreground: #7a7a7a;
+        --primary: #007acc;
+        --primary-foreground: #ffffff;
+        --destructive: #c62828;
+        --ring: #007acc;
+        --radius: 10px;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          /* VS Code-inspired dark */
+          --background: #1e1e1e;
+          --foreground: #cccccc;
+          --card: #252526;
+          --border: #333333;
+          --muted: #2a2a2a;
+          --muted-foreground: #999999;
+          --primary: #007acc;
+          --primary-foreground: #ffffff;
+          --destructive: #c62828;
+          --ring: #007acc;
+          color-scheme: dark;
+        }
+      }
+      /* Explicit overrides when user sets theme */
+      :root[data-theme="light"] { color-scheme: light; }
+      :root[data-theme="dark"] {
+        --background: #1e1e1e;
+        --foreground: #cccccc;
+        --card: #252526;
+        --border: #333333;
+        --muted: #2a2a2a;
+        --muted-foreground: #999999;
+        --primary: #007acc;
+        --primary-foreground: #ffffff;
+        --destructive: #c62828;
+        --ring: #007acc;
+        color-scheme: dark;
+      }
+      html, body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--background);
+        color: var(--foreground);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+        line-height: 1.45;
+      }
+      #app { max-width: 1100px; margin: 0 auto; padding: 16px 20px 40px; }
+      .topbar { position: sticky; top: 0; z-index: 100; background: var(--background); border-bottom: 1px solid var(--border); margin: -16px -20px 16px; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+      .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); display: inline-block; }
+      .toolbar { display: flex; align-items: center; gap: 8px; }
+      select, input[type="date"], input[type="text"], input[type="search"] { background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; outline: none; }
+      button { background: var(--muted); color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+      button:hover { background: var(--card); }
+      button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+      button.primary:hover { filter: brightness(1.05); }
+      hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+      section { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+      h1, h3 { margin: 0 0 8px; }
+      /* Cards */
+      .card { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--card); }
+      /* REC badge */
+      #rec-badge { position: fixed; top: 10px; right: 10px; background: var(--destructive) !important; color: #fff; padding: 6px 10px; border-radius: 999px; font-weight: bold; z-index: 9999; display: none; box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+      /* Modals */
+      #first-run, #consent { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 9998; background: rgba(0,0,0,0.45); backdrop-filter: saturate(120%) blur(1px); }
+      #first-run > div, #consent > div { background: var(--card) !important; color: var(--foreground) !important; padding: 18px; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+      #sources { display: flex; gap: 12px; flex-wrap: wrap; }
+      .source-card { width: 200px; }
+      .muted { color: var(--muted-foreground); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="topbar">
+        <div class="brand"><span class="dot"></span> <span>RecallOS</span></div>
+        <div class="toolbar">
+          <label for="theme-select" class="muted">Theme</label>
+          <select id="theme-select">
+            <option value="system" selected>System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+      </div>
+      <div id="rec-badge">REC</div>
+      <div id="first-run">
+        <div style="max-width: 720px; width: 92%; line-height:1.4;">
+          <h3>Welcome to RecallOS</h3>
+          <ol style="padding-left: 18px;">
+            <li style="margin-bottom:8px;">
+              Data directory: <span id="fr-data-dir" style="font-family:monospace;">(default)</span>
+              <div style="margin-top:6px;"><button id="fr-choose-dir">Choose Folder…</button></div>
+            </li>
+            <li style="margin-bottom:8px;">
+              OCR Language: <select id="fr-ocr-lang"><option value="eng" selected>English (eng)</option><option value="spa">Spanish (spa)</option><option value="fra">French (fra)</option><option value="deu">German (deu)</option></select>
+              <button id="fr-ensure-ocr">Ensure Language</button>
+            </li>
+            <li style="margin-bottom:8px;">
+              STT Model: <select id="fr-stt-model"><option value="ggml-tiny.en.bin">tiny.en</option><option value="ggml-base.en.bin" selected>base.en</option><option value="ggml-small.en.bin">small.en</option><option value="ggml-medium.en.bin">medium.en</option></select>
+              <button id="fr-ensure-stt">Ensure Model</button>
+            </li>
+            <li style="margin-bottom:8px;">
+              Microphone: <select id="fr-mic"></select>
+              <button id="fr-request-mic">Request Mic Permission</button>
+            </li>
+            <li style="margin-bottom:8px;">
+              Encryption (SQLCipher):
+              <div id="fr-enc-status" style="font-size:12px; color:#555; margin-top:4px;">Detecting…</div>
+              <div id="fr-enc-setup" style="display:none; margin-top:6px;">
+                <label for="fr-pass">Create passphrase:</label>
+                <input type="password" id="fr-pass" placeholder="Enter passphrase" style="margin-left:6px;" />
+                <button id="fr-pass-help" title="Show instructions">How to apply</button>
+                <div id="fr-pass-instructions" style="display:none; margin-top:6px; font-size:12px; color:#444;">
+                  <div>To enable encryption, restart the app with this environment variable set before launch (macOS zsh example):</div>
+                  <pre style="background:#f7f7f7; padding:8px; border-radius:4px; white-space: pre; overflow:auto;">RECALLOS_PASSPHRASE=&lt;your-passphrase&gt; pnpm start</pre>
+                  <div style="margin-top:6px;">Note: SQLCipher must be linked; if unavailable, the app will run with plain SQLite (WAL). Your passphrase is not stored by the app.</div>
+                </div>
+              </div>
+            </li>
+          </ol>
+          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+            <button id="fr-cancel">Quit</button>
+            <button id="fr-finish">Finish Setup</button>
+          </div>
+          <div id="fr-msg" style="margin-top:8px; color:#555; font-size:12px;"></div>
+        </div>
+      </div>
+  <div id="consent">
+    <div style="max-width: 600px; line-height:1.4;">
+          <h3>Consent & Privacy</h3>
+          <p>This app records your screen and microphone locally. Ensure you comply with laws and policies applicable to you. You control your data; nothing is uploaded.</p>
+          <div style="display:flex; gap:8px; justify-content:flex-end;">
+    <button id="consent-decline">Exit</button>
+    <button id="consent-accept" class="primary">I Understand</button>
+          </div>
+        </div>
+      </div>
+  <h1 class="muted" style="font-weight:600;">Quick Controls</h1>
+      <p><small id="ping"></small></p>
+      <hr />
+      <section>
+        <h3>Permissions</h3>
+        <button id="mic-status">Mic Status</button>
+        <button id="mic-request">Request Mic</button>
+        <button id="screen-settings">Open Screen Recording Settings</button>
+  <button id="screen-request">Request Screen Capture</button>
+    <pre id="perm-out" style="white-space: pre-wrap"></pre>
+  <div id="sys-audio" class="muted" style="margin-top:6px;"></div>
+      </section>
+      <hr />
+      <section>
+        <h3>Display Sources</h3>
+  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
+    <div style="font-weight:600;">Available:</div>
+    <button id="sources-refresh">Refresh Sources</button>
+  </div>
+  <div id="sources"></div>
+  <div id="sources-empty" class="muted" style="margin-top:8px; display:none;">No sources yet. On macOS, click “Request Screen Capture” above, then enable Screen Recording for RecallOS/Electron in System Settings and restart the app.</div>
+    <video id="preview" autoplay playsinline controls muted style="width: 100%; max-width: 800px; margin-top: 12px; background: #000; border-radius: 8px;"></video>
+      </section>
+      <hr />
+      <section>
+        <h3>Quick Screen Recorder (demo)</h3>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+      <button id="rec-start" class="primary">Start Recording</button>
+          <button id="rec-stop" disabled>Stop</button>
+          <button id="rec-pause" disabled>Pause</button>
+          <button id="rec-resume" disabled>Resume</button>
+          <span id="rec-status"></span>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+          <label for="mic-select">Mic:</label>
+          <select id="mic-select"></select>
+          <label for="mic-role" style="margin-left:8px;">Tag as:</label>
+          <select id="mic-role">
+            <option value="me" selected>Me</option>
+            <option value="others">Others (system/loopback)</option>
+            <option value="unknown">Unknown</option>
+          </select>
+          <label for="ocr-lang" style="margin-left:12px;">OCR Lang:</label>
+          <select id="ocr-lang">
+            <option value="eng" selected>English (eng)</option>
+            <option value="spa">Spanish (spa)</option>
+            <option value="fra">French (fra)</option>
+            <option value="deu">German (deu)</option>
+          </select>
+          <button id="ocr-lang-apply">Apply</button>
+          <label for="stt-model" style="margin-left:12px;">STT Model:</label>
+          <select id="stt-model">
+            <option value="ggml-tiny.en.bin">tiny.en (fastest, lowest accuracy)</option>
+            <option value="ggml-base.en.bin" selected>base.en (balanced)</option>
+            <option value="ggml-small.en.bin">small.en (better, slower)</option>
+            <option value="ggml-medium.en.bin">medium.en (best, slowest)</option>
+          </select>
+          <button id="stt-model-apply">Apply</button>
+        </div>
+      </section>
+      <hr />
+      <section>
+        <h3>Search</h3>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin-bottom:8px;">
+          <input id="search-input" placeholder="Search… (supports phrases, AND/OR, prefix*)" style="flex:1; min-width:260px; padding:6px;" />
+          <select id="search-type">
+            <option value="">All types</option>
+            <option value="ocr">OCR</option>
+            <option value="transcript">Transcript</option>
+          </select>
+          <select id="search-speaker">
+            <option value="">Any speaker</option>
+            <option value="me">Me</option>
+            <option value="others">Others</option>
+            <option value="unknown">Unknown</option>
+          </select>
+          <input id="search-app" type="text" list="apps-list" placeholder="App bundle/exe (optional)" style="min-width:200px;" />
+          <datalist id="apps-list"></datalist>
+          <input id="search-window" type="text" placeholder="Window title contains…" style="min-width:220px;" />
+          <input id="search-from" type="date" />
+          <input id="search-to" type="date" />
+          <button id="search-run">Search</button>
+        </div>
+  <div id="search-results" style="display:flex; flex-direction:column; gap:6px;"></div>
+        <div style="display:flex; gap:8px; margin-top:6px;">
+          <button id="search-prev">Prev</button>
+          <button id="search-next">Next</button>
+          <span id="search-page" style="align-self:center; color:#555;"></span>
+        </div>
+      </section>
+      <hr />
+      <section>
+        <h3>Per-app Defaults</h3>
+        <p style="color:#555;">Set default capture behavior per app (bundle ID or executable name). This config is stored locally.</p>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin-bottom:8px;">
+          <input id="app-key" placeholder="com.apple.Safari or chrome.exe" style="min-width:260px; padding:6px;" />
+          <select id="app-default">
+            <option value="on">Capture by default</option>
+            <option value="off">Do not capture by default</option>
+          </select>
+          <button id="app-add">Add / Update</button>
+        </div>
+        <div class="card" style="margin-bottom:8px;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+            <span class="muted">Current app:</span>
+            <code id="curr-app" style="flex:1;">(unknown)</code>
+            <input id="app-rename-bundle" placeholder="Bundle/exe to rename" style="min-width:220px;" />
+            <input id="app-rename-name" placeholder="Friendly name" style="min-width:220px;" />
+            <button id="app-rename">Rename App</button>
+          </div>
+        </div>
+        <div id="app-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+      </section>
+    </div>
+    <script>
+      // Minimal smoke test
+      const s = document.getElementById('ping');
+      s.textContent = window.recallos?.ping?.() ?? 'no api';
+
+      // Theme management
+      const themeSelect = document.getElementById('theme-select');
+      function applyTheme(mode) {
+        const root = document.documentElement;
+        if (!mode || mode === 'system') {
+          root.removeAttribute('data-theme');
+        } else if (mode === 'light' || mode === 'dark') {
+          root.setAttribute('data-theme', mode);
+        }
+      }
+      (async () => {
+        try {
+          const s = await window.recallos?.getSettings?.();
+          const mode = (s && s.theme) ? s.theme : 'system';
+          applyTheme(mode);
+          if (themeSelect) themeSelect.value = mode;
+        } catch {}
+      })();
+      themeSelect?.addEventListener('change', async () => {
+        const val = themeSelect.value;
+        applyTheme(val);
+        try { await window.recallos?.setSetting?.('theme', val); } catch {}
+      });
+
+      const permOut = document.getElementById('perm-out');
+      document.getElementById('mic-status').addEventListener('click', async () => {
+        const res = await window.recallos?.micPermissionStatus?.();
+        permOut.textContent = JSON.stringify(res, null, 2);
+      });
+      document.getElementById('mic-request').addEventListener('click', async () => {
+        const res = await window.recallos?.micPermissionRequest?.();
+        permOut.textContent = JSON.stringify(res, null, 2);
+      });
+      document.getElementById('screen-settings').addEventListener('click', async () => {
+        const res = await window.recallos?.openScreenRecordingSettings?.();
+        permOut.textContent = JSON.stringify(res, null, 2);
+      });
+      document.getElementById('screen-request').addEventListener('click', async () => {
+        try {
+          let stream;
+          if (navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices) {
+            // Modern path
+            stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+          } else {
+            // Fallback for Electron contexts without getDisplayMedia: use desktop getUserMedia
+            const sources = await window.recallos?.listCaptureSources?.(['screen']);
+            if (!sources || sources.length === 0) throw new Error('No display sources available');
+            const primary = sources.find(s => s.kind === 'screen') || sources[0];
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: primary.id,
+                  maxWidth: 2,
+                  maxHeight: 2,
+                  maxFrameRate: 1
+                }
+              }
+            });
+          }
+          // Stop immediately; this is only to get macOS to register the app in Screen Recording
+          stream.getTracks().forEach(t => t.stop());
+          alert('Requested screen capture. If macOS asked you to grant Screen Recording, enable it in System Settings and fully quit and relaunch RecallOS.');
+          try { await loadSources(); } catch {}
+        } catch (e) {
+          alert('Screen capture request failed: ' + (e?.message || e));
+        }
+      });
+      (async () => {
+        const det = await window.recallos?.detectSystemAudio?.();
+        const el = document.getElementById('sys-audio');
+        if (el && det) {
+          el.textContent = det.detected ? `System audio device detected (${det.platform}).` : `No loopback device detected. ${det.hint || ''}`;
+        }
+      })();
+
+      async function loadSources() {
+        const data = await window.recallos?.listCaptureSources?.(['screen','window']);
+        const cont = document.getElementById('sources');
+        cont.innerHTML = '';
+  const empty = document.getElementById('sources-empty');
+  if (!data || data.length === 0) { empty.style.display = 'block'; return; } else { empty.style.display = 'none'; }
+        (data || []).forEach(src => {
+          const card = document.createElement('div');
+          card.className = 'card source-card';
+          card.style.display = 'flex';
+          card.style.flexDirection = 'column';
+          card.style.gap = '6px';
+          if (src.thumbnail) {
+            const img = document.createElement('img');
+            img.src = src.thumbnail;
+            img.style.width = '100%';
+            img.style.height = 'auto';
+            card.appendChild(img);
+          }
+          const title = document.createElement('div');
+          title.textContent = src.name;
+          card.appendChild(title);
+          const btn = document.createElement('button');
+          btn.textContent = 'Preview';
+          btn.addEventListener('click', async () => {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                  mandatory: {
+                    chromeMediaSource: 'desktop',
+                    chromeMediaSourceId: src.id,
+                    maxFrameRate: 30
+                  }
+                }
+              });
+              const video = document.getElementById('preview');
+              if (video) {
+                (video).srcObject = stream;
+                await (video).play();
+              }
+            } catch (e) {
+              alert('Failed to start preview: ' + (e?.message || e));
+            }
+          });
+          card.appendChild(btn);
+          cont.appendChild(card);
+        });
+      }
+      loadSources();
+  document.getElementById('sources-refresh').addEventListener('click', loadSources);
+
+      // --- Minimal recording to chunks ---
+  let recordingStream = null;
+  let mediaRecorder = null;
+  let isPaused = false;
+      const recStatus = document.getElementById('rec-status');
+      const micSelect = document.getElementById('mic-select');
+
+      async function populateMics() {
+        const devs = await window.recallos?.listAudioDevices?.();
+        micSelect.innerHTML = '';
+        (devs || []).forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.deviceId;
+          opt.textContent = d.label || d.deviceId;
+          micSelect.appendChild(opt);
+        });
+      }
+
+      async function ensureScreenStream() {
+        if (recordingStream) return recordingStream;
+        // Try getDisplayMedia first, fall back to desktop getUserMedia
+        try {
+          if (navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices) {
+            const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+            const video = document.getElementById('preview');
+            if (video) { (video).srcObject = stream; try { await (video).play(); } catch {} }
+            recordingStream = stream;
+            return stream;
+          }
+        } catch (e) {
+          console.warn('getDisplayMedia failed:', e);
+        }
+        try {
+          const sources = await window.recallos?.listCaptureSources?.(['screen']);
+          if (!sources || sources.length === 0) throw new Error('No display sources');
+          const primary = sources.find(s => s.kind === 'screen') || sources[0];
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: primary.id, maxFrameRate: 30 } }
+          });
+          const video = document.getElementById('preview');
+          if (video) { (video).srcObject = stream; try { await (video).play(); } catch {} }
+          recordingStream = stream;
+          return stream;
+        } catch (e) {
+          throw e;
+        }
+      }
+
+      async function startRecording() {
+        if (!recordingStream) {
+          try { await ensureScreenStream(); } catch (e) { alert('No screen source available. Try Refresh Sources or Request Screen Capture.'); return; }
+        }
+        // Build a combined stream: screen video + optional mic audio
+        let mixedStream = new MediaStream();
+        recordingStream.getVideoTracks().forEach(t => mixedStream.addTrack(t));
+        try {
+          const sel = micSelect.value;
+          const mic = await navigator.mediaDevices.getUserMedia({ audio: sel ? { deviceId: sel } : true, video: false });
+          mic.getAudioTracks().forEach(t => mixedStream.addTrack(t));
+        } catch {}
+
+  const opts = { mimeType: 'video/webm;codecs=vp9,opus' };
+        try { mediaRecorder = new MediaRecorder(recordingStream, opts); } catch { mediaRecorder = new MediaRecorder(recordingStream); }
+        // If we successfully mixed, prefer recording the mixed stream
+        try { mediaRecorder = new MediaRecorder(mixedStream, opts); } catch {}
+
+    let lastChunkStart = Date.now();
+        mediaRecorder.ondataavailable = async (e) => {
+          try {
+            if (!e.data || e.data.size === 0) return;
+            const arrayBuf = await e.data.arrayBuffer();
+            const startedAt = lastChunkStart;
+            const durationMs = Date.now() - lastChunkStart;
+      lastChunkStart = Date.now();
+            const roleSel = document.getElementById('mic-role');
+            const audio_role = roleSel ? roleSel.value : 'unknown';
+            await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: 'video', codec: 'webm', ext: 'webm', audio_role });
+          } catch (err) {
+            console.error('saveChunk failed', err);
+          }
+        };
+  mediaRecorder.onstart = async () => { recStatus.textContent = 'Recording...'; document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
+  mediaRecorder.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
+  mediaRecorder.onpause = async () => { isPaused = true; recStatus.textContent = 'Paused'; };
+  mediaRecorder.onresume = async () => { isPaused = false; recStatus.textContent = 'Recording...'; };
+  // Start with a 5s timeslice to ensure valid standalone WebM segments
+  mediaRecorder.start(5000);
+      }
+
+      function stopRecording() {
+        try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+      }
+
+      document.getElementById('rec-start').addEventListener('click', async () => {
+        await startRecording();
+        (document.getElementById('rec-start')).disabled = true;
+        (document.getElementById('rec-stop')).disabled = false;
+        (document.getElementById('rec-pause')).disabled = false;
+        (document.getElementById('rec-resume')).disabled = true;
+      });
+      document.getElementById('rec-stop').addEventListener('click', () => {
+        stopRecording();
+        (document.getElementById('rec-start')).disabled = false;
+        (document.getElementById('rec-stop')).disabled = true;
+        (document.getElementById('rec-pause')).disabled = true;
+        (document.getElementById('rec-resume')).disabled = true;
+        isPaused = false;
+      });
+      document.getElementById('rec-pause').addEventListener('click', async () => {
+        try { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.pause(); } catch {}
+        (document.getElementById('rec-pause')).disabled = true;
+        (document.getElementById('rec-resume')).disabled = false;
+      });
+      document.getElementById('rec-resume').addEventListener('click', async () => {
+        try { if (mediaRecorder && mediaRecorder.state === 'paused') mediaRecorder.resume(); } catch {}
+        (document.getElementById('rec-pause')).disabled = false;
+        (document.getElementById('rec-resume')).disabled = true;
+      });
+
+      // OCR language management
+      document.getElementById('ocr-lang-apply').addEventListener('click', async () => {
+        const sel = (document.getElementById('ocr-lang')).value;
+        try {
+          const res = await window.recallos?.ensureOcrLanguage?.(sel);
+          alert(res?.ok ? `OCR language set to ${sel}` : `Failed to set OCR language: ${res?.error || 'unknown'}`);
+        } catch (e) {
+          alert('Failed to set OCR language: ' + (e?.message || e));
+        }
+      });
+
+      // STT model management
+      document.getElementById('stt-model-apply').addEventListener('click', async () => {
+        const sel = (document.getElementById('stt-model')).value;
+        try {
+          const res = await window.recallos?.setSttModel?.(sel);
+          alert(res?.ok ? `STT model set to ${sel}` : `Failed to set STT model: ${res?.error || 'unknown'}`);
+        } catch (e) {
+          alert('Failed to set STT model: ' + (e?.message || e));
+        }
+      });
+
+      // Bind the preview stream to be used for recording too
+  (async () => {
+        // First-run wizard and consent handling
+        const settings = await window.recallos?.getSettings?.();
+        const isFirst = !settings || !settings.first_run_completed;
+        const consentSeen = settings && settings.consent_ack === '1';
+        const consentEl = document.getElementById('consent');
+        const frEl = document.getElementById('first-run');
+        if (!consentSeen && consentEl) {
+          consentEl.style.display = 'flex';
+          document.getElementById('consent-accept').addEventListener('click', async () => {
+            consentEl.style.display = 'none';
+            try { await window.recallos?.setSetting?.('consent_ack', '1'); } catch {}
+          });
+          document.getElementById('consent-decline').addEventListener('click', () => { window.close(); });
+        }
+        if (isFirst && frEl) {
+          frEl.style.display = 'flex';
+          const dirSpan = document.getElementById('fr-data-dir');
+          const setMsg = (m) => { const el = document.getElementById('fr-msg'); if (el) el.textContent = m; };
+          if (settings?.data_dir) dirSpan.textContent = settings.data_dir;
+          document.getElementById('fr-choose-dir').addEventListener('click', async () => {
+            const res = await window.recallos?.chooseDirectory?.();
+            if (res?.ok && res.path) {
+              dirSpan.textContent = res.path;
+              await window.recallos?.setSetting?.('data_dir', res.path);
+            }
+          });
+          // Populate mics
+          const micSel = document.getElementById('fr-mic');
+          const devs = await window.recallos?.listAudioDevices?.();
+          (devs||[]).forEach(d => { const o=document.createElement('option'); o.value=d.deviceId; o.textContent=d.label||d.deviceId; micSel.appendChild(o); });
+          document.getElementById('fr-request-mic').addEventListener('click', async () => {
+            const r = await window.recallos?.micPermissionRequest?.();
+            setMsg(r?.granted ? 'Microphone access granted.' : 'Microphone access not granted.');
+          });
+          document.getElementById('fr-ensure-ocr').addEventListener('click', async () => {
+            const lang = (document.getElementById('fr-ocr-lang')).value;
+            const r = await window.recallos?.ensureOcrLanguage?.(lang);
+            setMsg(r?.ok ? `OCR language ensured: ${lang}` : `OCR failed: ${r?.error||'unknown'}`);
+          });
+          document.getElementById('fr-ensure-stt').addEventListener('click', async () => {
+            const model = (document.getElementById('fr-stt-model')).value;
+            const r = await window.recallos?.setSttModel?.(model);
+            setMsg(r?.ok ? `STT model ready: ${model}` : `Model failed: ${r?.error||'unknown'}`);
+          });
+          document.getElementById('fr-cancel').addEventListener('click', () => window.close());
+          document.getElementById('fr-finish').addEventListener('click', async () => {
+            try { await window.recallos?.setSetting?.('first_run_completed', '1'); } catch {}
+            frEl.style.display = 'none';
+          });
+          // SQL features + encryption guidance
+          try {
+            const feats = await window.recallos?.getSqlFeatures?.();
+            const enc = document.getElementById('fr-enc-status');
+            const setup = document.getElementById('fr-enc-setup');
+            if (feats && feats.ok) {
+              if (feats.sqlcipher) {
+                enc.textContent = `SQLCipher linked (cipher=${feats.cipherVersion || 'unknown'}). You can enable encryption by restarting with RECALLOS_PASSPHRASE.`;
+                setup.style.display = 'block';
+              } else {
+                enc.textContent = 'SQLCipher is not linked. The app will use plain SQLite (WAL). To use encryption, rebuild with SQLCipher-enabled SQLite.';
+                setup.style.display = 'none';
+              }
+            } else {
+              enc.textContent = 'Could not detect SQL features.';
+            }
+          } catch {}
+          document.getElementById('fr-pass-help').addEventListener('click', () => {
+            const inst = document.getElementById('fr-pass-instructions');
+            inst.style.display = inst.style.display === 'none' ? 'block' : 'none';
+          });
+        }
+        const prevBtnHandler = async (src) => {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: src.id,
+                  maxFrameRate: 30
+                }
+              }
+            });
+            const video = document.getElementById('preview');
+            if (video) {
+              (video).srcObject = stream;
+              await (video).play();
+            }
+            recordingStream = stream;
+          } catch (e) {
+            alert('Failed to start preview: ' + (e?.message || e));
+          }
+        };
+        // Rewire the Preview buttons with shared handler
+        const cont = document.getElementById('sources');
+        const observer = new MutationObserver(() => {
+          cont.querySelectorAll('button').forEach((btn) => {
+            if ((btn)._recBound) return;
+            (btn)._recBound = true;
+            btn.addEventListener('click', async (ev) => {
+              const card = btn.parentElement;
+              const name = card.querySelector('div')?.textContent || '';
+              const data = await window.recallos?.listCaptureSources?.(['screen','window']);
+              const match = (data||[]).find(s => s.name === name);
+              if (match) await prevBtnHandler(match);
+            });
+          });
+        });
+        observer.observe(cont, { childList: true, subtree: true });
+  await populateMics();
+      })();
+
+      // --- Search wiring ---
+      let searchOffset = 0;
+      const searchLimit = 20;
+      async function runSearch(reset = false) {
+        try {
+          const q = (document.getElementById('search-input')).value.trim();
+          if (!q) return;
+          if (reset) searchOffset = 0;
+          const type = (document.getElementById('search-type')).value || undefined;
+          const speaker = (document.getElementById('search-speaker')).value || undefined;
+          const app = (document.getElementById('search-app')).value.trim() || undefined;
+          const windowTitle = (document.getElementById('search-window')).value.trim() || undefined;
+          const fromStr = (document.getElementById('search-from')).value;
+          const toStr = (document.getElementById('search-to')).value;
+          const toEpoch = (dstr) => dstr ? Math.floor(new Date(dstr + 'T00:00:00').getTime() / 1000) : undefined;
+          const from = toEpoch(fromStr);
+          const to = toEpoch(toStr) ? (toEpoch(toStr) + 24*3600 - 1) : undefined;
+          const opts = { type, speaker, from, to, app, window: windowTitle };
+          const rows = await window.recallos?.searchSnippets?.(q, searchLimit, searchOffset, 80, opts);
+          const cont = document.getElementById('search-results');
+          cont.innerHTML = '';
+          (rows||[]).forEach(r => {
+            const item = document.createElement('div');
+            item.style.border = '1px solid #ddd'; item.style.padding = '6px'; item.style.borderRadius = '4px';
+            const meta = document.createElement('div'); meta.style.fontSize = '12px'; meta.style.color = '#555';
+            const appText = (r.app_name || r.app_bundle) ? ` • ${r.app_name || r.app_bundle}${r.window_title ? ` — “${String(r.window_title).slice(0,60)}”` : ''}` : '';
+            meta.textContent = `${r.type} • t=${Math.floor(r.ts_ms/1000)}s${appText}`;
+            const snip = document.createElement('div'); snip.innerHTML = r.snippet.replaceAll('<','&lt;').replaceAll('>','&gt;');
+            const actions = document.createElement('div'); actions.style.marginTop = '4px';
+            const btn = document.createElement('button'); btn.textContent = 'Jump';
+            btn.addEventListener('click', async () => {
+              const m = await window.recallos?.getMoment?.({ chunk_id: r.chunk_id, ts_ms: r.ts_ms });
+              if (m && m.ok) {
+                const video = document.getElementById('preview');
+                const url = m.path.startsWith('file://') ? m.path : `file://${m.path}`;
+                video.src = url; // play local file with file:// scheme
+                try { await video.play(); } catch {}
+                // Seek when metadata is loaded
+                video.onloadedmetadata = () => { video.currentTime = m.absMs / 1000; };
+              } else {
+                alert('Failed to open media.');
+              }
+            });
+            actions.appendChild(btn);
+            item.appendChild(meta);
+            item.appendChild(snip);
+            item.appendChild(actions);
+            cont.appendChild(item);
+          });
+          document.getElementById('search-page').textContent = `Showing ${searchOffset+1}-${searchOffset+(rows?.length||0)}`;
+        } catch (e) {
+          console.error('search failed', e);
+        }
+      }
+      document.getElementById('search-run').addEventListener('click', () => runSearch(true));
+      document.getElementById('search-next').addEventListener('click', () => { searchOffset += searchLimit; runSearch(); });
+      document.getElementById('search-prev').addEventListener('click', () => { searchOffset = Math.max(0, searchOffset - searchLimit); runSearch(); });
+
+      // Populate app suggestions for search filter
+      (async () => {
+        try {
+          const res = await window.recallos?.listApps?.();
+          if (res?.ok && Array.isArray(res.apps)) {
+            const dl = document.getElementById('apps-list');
+            dl.innerHTML = '';
+            res.apps.forEach(a => {
+              const opt = document.createElement('option');
+              opt.value = a.bundle_or_exe;
+              opt.label = a.display_name || a.bundle_or_exe;
+              dl.appendChild(opt);
+            });
+          }
+        } catch {}
+      })();
+
+      // --- Per-app defaults wiring ---
+      async function loadAppDefaults() {
+        const s = await window.recallos?.getSettings?.();
+        let obj = {};
+        try { obj = s?.app_opt_in_defaults ? JSON.parse(s.app_opt_in_defaults) : {}; } catch { obj = {}; }
+        const cont = document.getElementById('app-list');
+        cont.innerHTML = '';
+        const keys = Object.keys(obj).sort();
+        if (keys.length === 0) { cont.innerHTML = '<div style="color:#666;">No per-app defaults set.</div>'; return; }
+        keys.forEach(k => {
+          const row = document.createElement('div');
+          row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center';
+          const key = document.createElement('code'); key.textContent = k; key.style.flex = '1';
+          const val = document.createElement('span'); val.textContent = obj[k] === 'off' ? 'Do not capture' : 'Capture'; val.style.color = '#555';
+          const del = document.createElement('button'); del.textContent = 'Remove';
+          del.addEventListener('click', async () => {
+            delete obj[k];
+            await window.recallos?.setSetting?.('app_opt_in_defaults', JSON.stringify(obj));
+            await loadAppDefaults();
+          });
+          row.appendChild(key); row.appendChild(val); row.appendChild(del);
+          cont.appendChild(row);
+        });
+      }
+      document.getElementById('app-add').addEventListener('click', async () => {
+        const s = await window.recallos?.getSettings?.();
+        let obj = {};
+        try { obj = s?.app_opt_in_defaults ? JSON.parse(s.app_opt_in_defaults) : {}; } catch { obj = {}; }
+        const key = (document.getElementById('app-key')).value.trim();
+        const def = (document.getElementById('app-default')).value;
+        if (!key) { alert('Enter a bundle ID or exe name'); return; }
+        obj[key] = def === 'off' ? 'off' : 'on';
+        await window.recallos?.setSetting?.('app_opt_in_defaults', JSON.stringify(obj));
+        (document.getElementById('app-key')).value = '';
+        await loadAppDefaults();
+      });
+      loadAppDefaults();
+
+      // App rename and current app helper
+      (async () => {
+        try {
+          const cur = await window.recallos?.getCurrentApp?.();
+          const el = document.getElementById('curr-app');
+          if (cur?.ok && cur.current && el) {
+            el.textContent = `${cur.current.display_name} (${cur.current.bundle_or_exe}) — "${(cur.current.window_title||'').slice(0,64)}"`;
+            (document.getElementById('app-rename-bundle')).value = cur.current.bundle_or_exe;
+          }
+        } catch {}
+      })();
+      document.getElementById('app-rename').addEventListener('click', async () => {
+        const bundle = (document.getElementById('app-rename-bundle')).value.trim();
+        const name = (document.getElementById('app-rename-name')).value.trim();
+        if (!bundle) { alert('Enter a bundle/exe'); return; }
+        const res = await window.recallos?.renameApp?.(bundle, name);
+        if (!res?.ok) alert('Rename failed: ' + (res?.error || 'unknown'));
+        (document.getElementById('app-rename-name')).value = '';
+      });
+    </script>
+  </body>
+</html>

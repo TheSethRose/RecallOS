@@ -1,0 +1,48 @@
+{
+  "name": "recallos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RecallOS app (Electron + Node) — core scaffolding",
+  "license": "MIT",
+  "packageManager": "pnpm@9.6.0",
+  "type": "commonjs",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cpx \"src/renderer/**/*\" dist/renderer",
+    "start": "electron .",
+    "dev": "concurrently -k \"tsc -w\" \"cpx 'src/renderer/**/*' dist/renderer -w\" \"wait-on dist/main/main.js && electron .\"",
+    "lint": "eslint .",
+    "format": "prettier -w .",
+    "prepare": "husky install",
+    "licenses": "node scripts/list-licenses.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "electron-store": "^9.0.0",
+    "extract-zip": "^2.0.1",
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "concurrently": "^8.2.2",
+    "cpx2": "^8.0.0",
+    "electron": "^31.7.7",
+    "eslint": "^8.57.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.2",
+    "prettier": "^3.6.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4",
+    "wait-on": "^7.2.0"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "lint-staged": {
+    "**/*.{js,ts,tsx,jsx,json,css,md}": [
+      "prettier -w"
+    ]
+  }
+}
