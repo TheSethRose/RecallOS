@@ -55,7 +55,7 @@ models/**/*.sha256
 !models/ggml-base.en.bin.sha256
 !models/tessdata/eng.traineddata.sha256
 models/**/*.bin
-!models/ggml-base.en.bin
+# No exceptions for large ggml binaries; they must be managed via runtime download or LFS
 models/tessdata/*.traineddata
 !models/tessdata/eng.traineddata
 
