@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, desktopCapturer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('recallos', {
   ping: () => 'pong',
@@ -25,16 +25,8 @@ contextBridge.exposeInMainWorld('recallos', {
   exportRange: async (destDir: string, from: number, to: number, opts?: { includeMedia?: boolean }) => ipcRenderer.invoke('recallos:export:range', { destDir, from, to, includeMedia: !!opts?.includeMedia }),
   // Calendar
   importIcs: async () => ipcRenderer.invoke('recallos:calendar:importIcs'),
-  listCaptureSources: async (types: Array<'screen' | 'window'> = ['screen', 'window']) => {
-    const sources = await desktopCapturer.getSources({ types, thumbnailSize: { width: 320, height: 200 } });
-    return sources.map(s => ({
-      id: s.id,
-      name: s.name,
-      kind: s.id?.startsWith('screen:') ? 'screen' : (s.id?.startsWith('window:') ? 'window' : 'unknown'),
-      displayId: (s as any).display_id || (s as any).displayId || null,
-      thumbnail: s.thumbnail?.toDataURL?.() || null
-    }));
-  },
+  listCaptureSources: async (types: Array<'screen' | 'window'> = ['screen', 'window']) =>
+    ipcRenderer.invoke('recallos:capture:listSources', { types }),
   detectSystemAudio: async () => {
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
@@ -54,11 +46,13 @@ contextBridge.exposeInMainWorld('recallos', {
       return [];
     }
   },
-  saveChunk: async (buffer: ArrayBuffer, meta: { startedAt?: number; durationMs?: number; type?: string; width?: number; height?: number; sample_rate?: number; channel_layout?: string; codec?: string; ext?: string; audio_role?: string }) =>
+  saveChunk: async (buffer: ArrayBuffer, meta: { startedAt?: number; durationMs?: number; type?: string; width?: number; height?: number; sample_rate?: number; channel_layout?: string; codec?: string; ext?: string; audio_role?: string; display_id?: string | null; display_name?: string | null }) =>
     ipcRenderer.invoke('recallos:saveChunk', { buffer, ...meta }),
   setRecordingIndicator: async (active: boolean) => ipcRenderer.invoke('recallos:recording:set', { active }),
   getMoment: async (payload: { chunk_id: number; ts_ms: number }) => ipcRenderer.invoke('recallos:getMoment', payload),
   openSettings: async () => ipcRenderer.invoke('recallos:ui:openSettings'),
+  // Logging
+  log: async (level: 'info'|'warn'|'error', message: string, meta?: any) => ipcRenderer.invoke('recallos:log', { level, message, meta }),
   // Saved searches
   getSavedSearches: async () => ipcRenderer.invoke('recallos:saved:get'),
   saveSearch: async (name: string, query: string) => ipcRenderer.invoke('recallos:saved:put', { name, query }),

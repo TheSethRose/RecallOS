@@ -133,6 +133,13 @@ export function runMigrations(db: DB): { applied: string[] } {
     `CREATE INDEX IF NOT EXISTS idx_jobs_status_next_run ON jobs(status, next_run_at, created_at)`
   ]});
 
+  // 0005 - media source metadata (display)
+  migrations.push({ name: '0005_media_display', sql: [
+    // SQLite doesn't support IF NOT EXISTS for columns; ignore errors on re-run
+    `ALTER TABLE media_chunks ADD COLUMN display_id TEXT`,
+    `ALTER TABLE media_chunks ADD COLUMN display_name TEXT`
+  ]});
+
   const applied: string[] = [];
   for (const m of migrations) {
     if (appliedSet.has(m.name)) continue;

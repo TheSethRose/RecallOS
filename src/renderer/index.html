@@ -105,6 +105,13 @@
       <div id="first-run">
         <div style="max-width: 720px; width: 92%; line-height:1.4;">
           <h3>Welcome to RecallOS</h3>
+          <p style="margin:8px 0 10px;">This app records your screen and microphone locally to make your history searchable. Nothing is uploaded. Ensure you comply with laws and policies applicable to you.</p>
+          <div style="margin:8px 0 14px; padding:10px; border:1px solid var(--border); border-radius:8px; background: var(--muted);">
+            <label style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="checkbox" id="fr-consent" />
+              <span>I understand and consent to local recording on this device by RecallOS.</span>
+            </label>
+          </div>
           <ol style="padding-left: 18px;">
             <li style="margin-bottom:8px;">
               Data directory: <span id="fr-data-dir" style="font-family:monospace;">(default)</span>
@@ -139,21 +146,12 @@
           </ol>
           <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
             <button id="fr-cancel">Quit</button>
-            <button id="fr-finish">Finish Setup</button>
+            <button id="fr-finish" disabled>Finish Setup</button>
           </div>
           <div id="fr-msg" style="margin-top:8px; color:#555; font-size:12px;"></div>
         </div>
       </div>
-  <div id="consent">
-    <div style="max-width: 600px; line-height:1.4;">
-          <h3>Consent & Privacy</h3>
-          <p>This app records your screen and microphone locally. Ensure you comply with laws and policies applicable to you. You control your data; nothing is uploaded.</p>
-          <div style="display:flex; gap:8px; justify-content:flex-end;">
-    <button id="consent-decline">Exit</button>
-    <button id="consent-accept" class="primary">I Understand</button>
-          </div>
-        </div>
-      </div>
+      <!-- Consent merged into First-Run -->
   <h1 class="muted" style="font-weight:600;">Quick Controls</h1>
       <p><small id="ping"></small></p>
       <hr />
@@ -167,19 +165,10 @@
   <div id="sys-audio" class="muted" style="margin-top:6px;"></div>
       </section>
       <hr />
-      <section>
-        <h3>Display Sources</h3>
-  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
-    <div style="font-weight:600;">Available:</div>
-    <button id="sources-refresh">Refresh Sources</button>
-  </div>
-  <div id="sources"></div>
-  <div id="sources-empty" class="muted" style="margin-top:8px; display:none;">No sources yet. On macOS, click “Request Screen Capture” above, then enable Screen Recording for RecallOS/Electron in System Settings and restart the app.</div>
-    <video id="preview" autoplay playsinline controls muted style="width: 100%; max-width: 800px; margin-top: 12px; background: #000; border-radius: 8px;"></video>
-      </section>
+  <!-- Preview section removed -->
       <hr />
       <section>
-        <h3>Quick Screen Recorder (demo)</h3>
+        <h3>Screen Recorder</h3>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
       <button id="rec-start" class="primary">Start Recording</button>
           <button id="rec-stop" disabled>Stop</button>
@@ -187,6 +176,7 @@
           <button id="rec-resume" disabled>Resume</button>
           <span id="rec-status"></span>
         </div>
+  <div id="rec-previews" style="display:none; margin-top:8px; gap:8px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));"></div>
         <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
           <label for="cap-screen" style="margin-left:0;">Capture Screen</label>
           <input id="cap-screen" type="checkbox" checked />
@@ -332,7 +322,6 @@
           // Stop immediately; this is only to get macOS to register the app in Screen Recording
           stream.getTracks().forEach(t => t.stop());
           alert('Requested screen capture. If macOS asked you to grant Screen Recording, enable it in System Settings and fully quit and relaunch RecallOS.');
-          try { await loadSources(); } catch {}
         } catch (e) {
           alert('Screen capture request failed: ' + (e?.message || e));
         }
@@ -345,62 +334,14 @@
         }
       })();
 
-      async function loadSources() {
-        const data = await window.recallos?.listCaptureSources?.(['screen','window']);
-        const cont = document.getElementById('sources');
-        cont.innerHTML = '';
-  const empty = document.getElementById('sources-empty');
-  if (!data || data.length === 0) { empty.style.display = 'block'; return; } else { empty.style.display = 'none'; }
-        (data || []).forEach(src => {
-          const card = document.createElement('div');
-          card.className = 'card source-card';
-          card.style.display = 'flex';
-          card.style.flexDirection = 'column';
-          card.style.gap = '6px';
-          if (src.thumbnail) {
-            const img = document.createElement('img');
-            img.src = src.thumbnail;
-            img.style.width = '100%';
-            img.style.height = 'auto';
-            card.appendChild(img);
-          }
-          const title = document.createElement('div');
-          title.textContent = src.name;
-          card.appendChild(title);
-          const btn = document.createElement('button');
-          btn.textContent = 'Preview';
-          btn.addEventListener('click', async () => {
-            try {
-              const stream = await navigator.mediaDevices.getUserMedia({
-                audio: false,
-                video: {
-                  mandatory: {
-                    chromeMediaSource: 'desktop',
-                    chromeMediaSourceId: src.id,
-                    maxFrameRate: 30
-                  }
-                }
-              });
-              const video = document.getElementById('preview');
-              if (video) {
-                (video).srcObject = stream;
-                await (video).play();
-              }
-            } catch (e) {
-              alert('Failed to start preview: ' + (e?.message || e));
-            }
-          });
-          card.appendChild(btn);
-          cont.appendChild(card);
-        });
-      }
-      loadSources();
-  document.getElementById('sources-refresh').addEventListener('click', loadSources);
+  // Display Sources UI removed; single preview is kept for quick checks
 
-      // --- Minimal recording to chunks ---
-  let recordingStream = null;
-  let mediaRecorder = null;
+    // --- Recording to chunks (multi-display) ---
+  let recordingStream = null; // preview-only stream
+  let multiRecorders = [];
+  let micShared = null;
   let isPaused = false;
+  let isStarting = false;
       const recStatus = document.getElementById('rec-status');
       const micSelect = document.getElementById('mic-select');
       const capScreenEl = document.getElementById('cap-screen');
@@ -451,59 +392,285 @@
       }
 
       async function startRecording() {
+        try { await window.recallos?.log?.('info', 'startRecording: invoked'); } catch {}
         const wantScreen = !!capScreenEl?.checked;
         const wantMic = !!capMicEl?.checked;
-        if (!wantScreen && !wantMic) { alert('Both screen and mic capture are disabled. Enable at least one.'); return; }
-        if (!recordingStream && wantScreen) {
-          try { await ensureScreenStream(); } catch (e) { alert('No screen source available. Try Refresh Sources or Request Screen Capture.'); return; }
-        }
-        // Build a combined stream: screen video + optional mic audio
-        let mixedStream = new MediaStream();
-        if (wantScreen && recordingStream) {
-          recordingStream.getVideoTracks().forEach(t => mixedStream.addTrack(t));
-        }
+        try { await window.recallos?.log?.('info', 'startRecording: toggles', { wantScreen, wantMic }); } catch {}
         try {
-          if (wantMic) {
-            const sel = micSelect.value || micDevicePref;
-            const mic = await navigator.mediaDevices.getUserMedia({ audio: sel ? { deviceId: sel } : true, video: false });
-            mic.getAudioTracks().forEach(t => mixedStream.addTrack(t));
-          }
+          const mrAvail = typeof MediaRecorder !== 'undefined';
+          const mimeCandidates = [
+            'video/webm;codecs=vp9,opus',
+            'video/webm;codecs=vp8,opus',
+            'video/webm',
+            'audio/webm;codecs=opus',
+            'audio/webm'
+          ];
+          const mimeSupport = mrAvail ? mimeCandidates.map(m => ({ mime: m, supported: MediaRecorder.isTypeSupported(m) })) : [];
+          const constraintsSupport = (navigator.mediaDevices && navigator.mediaDevices.getSupportedConstraints) ? navigator.mediaDevices.getSupportedConstraints() : {};
+          const gdmAvail = !!(navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices);
+          await window.recallos?.log?.('info', 'capabilities', { mediaRecorder: mrAvail, mimeSupport, constraintsSupport, getDisplayMedia: gdmAvail });
         } catch {}
-
-  const opts = { mimeType: 'video/webm;codecs=vp9,opus' };
-        // If we successfully mixed, prefer recording the mixed stream; else fall back
-        try { mediaRecorder = new MediaRecorder(mixedStream, opts); } catch { try { mediaRecorder = new MediaRecorder(mixedStream); } catch {} }
-
-    let lastChunkStart = Date.now();
-        mediaRecorder.ondataavailable = async (e) => {
+        try {
+          const devs = await navigator.mediaDevices.enumerateDevices();
+          const info = (devs||[]).map(d => ({ kind: d.kind, label: d.label, deviceId: d.deviceId }));
+          await window.recallos?.log?.('info', 'enumerateDevices', info);
+        } catch (e) { try { await window.recallos?.log?.('warn', 'enumerateDevices failed', { err: String(e) }); } catch {} }
+        if (!wantScreen && !wantMic) { try { await window.recallos?.log?.('warn', 'startRecording: neither screen nor mic selected'); } catch {} alert('Both screen and mic capture are disabled. Enable at least one.'); return false; }
+        // Prepare mic (once) if requested
+        micShared = null;
+    if (wantMic) {
           try {
-            if (!e.data || e.data.size === 0) return;
-            const arrayBuf = await e.data.arrayBuffer();
-            const startedAt = lastChunkStart;
-            const durationMs = Date.now() - lastChunkStart;
-      lastChunkStart = Date.now();
-            const roleSel = document.getElementById('mic-role');
-            const audio_role = roleSel ? roleSel.value : 'unknown';
-            const isAudioOnly = !wantScreen && wantMic;
-            await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: isAudioOnly ? 'audio' : 'video', codec: 'webm', ext: 'webm', audio_role });
-          } catch (err) {
-            console.error('saveChunk failed', err);
+            const sel = (micSelect && micSelect.value) ? micSelect.value : (micDevicePref || '');
+      const audioConstraint = sel ? { deviceId: { exact: sel } } : true;
+      micShared = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false });
+            try {
+              const aTracks = micShared.getAudioTracks();
+              await window.recallos?.log?.('info', 'startRecording: mic stream acquired', {
+                deviceId: sel || 'default',
+                tracks: aTracks.length,
+                settings: aTracks[0] ? aTracks[0].getSettings?.() : null
+              });
+            } catch {}
+          } catch {}
+        }
+
+        // Build one recorder per display, or a single audio-only recorder when screen is off
+        multiRecorders = [];
+        const opts = { mimeType: 'video/webm;codecs=vp9,opus' };
+        const roleSel = document.getElementById('mic-role');
+        const audio_role = roleSel ? roleSel.value : 'unknown';
+
+        let startedAny = false;
+        // Reset and show multi-preview grid when we intend to capture screens
+        const recPreviews = document.getElementById('rec-previews');
+        if (wantScreen && recPreviews) {
+          recPreviews.innerHTML = '';
+          recPreviews.style.display = 'grid';
+        }
+        if (wantScreen) {
+          let sources = [];
+          try {
+            sources = await window.recallos?.listCaptureSources?.(['screen']) || [];
+            try { await window.recallos?.log?.('info', 'startRecording: sources', { count: sources.length, items: sources }); } catch {}
+          } catch (e) {
+            try { await window.recallos?.log?.('error', 'listCaptureSources failed', { err: String(e) }); } catch {}
           }
-        };
-  mediaRecorder.onstart = async () => { recStatus.textContent = 'Recording...'; if (privacyEnabled) document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
-  mediaRecorder.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
-  mediaRecorder.onpause = async () => { isPaused = true; recStatus.textContent = 'Paused'; };
-  mediaRecorder.onresume = async () => { isPaused = false; recStatus.textContent = 'Recording...'; };
-  // Start with a 5s timeslice to ensure valid standalone WebM segments
-  mediaRecorder.start(5000);
+          if (!sources || sources.length === 0) {
+            try { await window.recallos?.log?.('warn', 'startRecording: no screen sources'); } catch {}
+          }
+          for (const src of sources.filter(s => s.kind === 'screen')) {
+            try {
+              const vConstraints = { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: src.id, maxFrameRate: 30 } };
+              try { await window.recallos?.log?.('info', 'screen getUserMedia: attempt', { source: src, constraints: vConstraints }); } catch {}
+              const screenStream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: vConstraints
+              });
+              try {
+                const vTracks = screenStream.getVideoTracks();
+                await window.recallos?.log?.('info', 'screen stream acquired', {
+                  tracks: vTracks.length,
+                  settings: vTracks[0] ? vTracks[0].getSettings?.() : null
+                });
+              } catch {}
+              const mixed = new MediaStream();
+              screenStream.getVideoTracks().forEach(t => mixed.addTrack(t));
+              if (micShared) {
+                micShared.getAudioTracks().forEach(t => mixed.addTrack(t.clone ? t.clone() : t));
+              }
+              let rec = null;
+              try {
+                rec = new MediaRecorder(mixed, opts);
+                try { await window.recallos?.log?.('info', 'MediaRecorder created', { mime: opts.mimeType, actual: rec.mimeType }); } catch {}
+              } catch (err1) {
+                try { await window.recallos?.log?.('warn', 'MediaRecorder fell back (no opts)', { err: String(err1) }); } catch {}
+                try {
+                  rec = new MediaRecorder(mixed);
+                  try { await window.recallos?.log?.('info', 'MediaRecorder created (no opts)', { actual: rec.mimeType }); } catch {}
+                } catch (err2) {
+                  try { await window.recallos?.log?.('error', 'MediaRecorder creation failed', { err: String(err2) }); } catch {}
+                }
+              }
+              const state = { rec, stream: mixed, displayId: src.displayId || src.id || null, displayName: src.name || 'Screen', lastChunkStart: Date.now() };
+              rec.ondataavailable = async (e) => {
+                try {
+                  if (!e.data || e.data.size === 0) return;
+                  const arrayBuf = await e.data.arrayBuffer();
+                  const startedAt = state.lastChunkStart;
+                  const durationMs = Date.now() - state.lastChunkStart;
+                  state.lastChunkStart = Date.now();
+                  await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: 'video', codec: 'webm', ext: 'webm', audio_role, display_id: String(state.displayId || ''), display_name: state.displayName });
+                } catch (err) {
+          console.error('saveChunk failed', err);
+          try { await window.recallos?.log?.('error', 'saveChunk failed', { err: String(err) }); } catch {}
+                }
+              };
+              rec.onstart = async () => { recStatus.textContent = 'Recording...'; if (privacyEnabled) document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
+              rec.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
+              rec.onpause = () => { isPaused = true; recStatus.textContent = 'Paused'; };
+              rec.onresume = () => { isPaused = false; recStatus.textContent = 'Recording...'; };
+              rec.onerror = async (evt) => { try { await window.recallos?.log?.('error', 'recorder error', { message: evt?.error?.message || String(evt) }); } catch {} };
+              try { await window.recallos?.log?.('info', 'recorder: about to start', { name: state.displayName }); } catch {}
+              rec.start(5000);
+              multiRecorders.push(state);
+        try { await window.recallos?.log?.('info', 'recorder started', { displayId: state.displayId, name: state.displayName }); } catch {}
+        // Create a preview tile for this display
+        try {
+                  const grid = document.getElementById('rec-previews');
+                  if (grid) {
+                    const tile = document.createElement('div');
+                    tile.className = 'card';
+                    tile.style.display = 'flex';
+                    tile.style.flexDirection = 'column';
+                    tile.style.gap = '6px';
+                    const label = document.createElement('div');
+                    label.textContent = state.displayName || 'Display';
+                    label.style.fontSize = '12px';
+                    label.style.color = 'var(--muted-foreground)';
+                    const vid = document.createElement('video');
+                    vid.autoplay = true; vid.muted = true; vid.playsInline = true; vid.controls = false;
+                    vid.style.width = '100%'; vid.style.background = '#000'; vid.style.borderRadius = '6px'; vid.style.objectFit = 'contain';
+                    vid.srcObject = screenStream;
+                    tile.appendChild(vid);
+                    tile.appendChild(label);
+                    grid.appendChild(tile);
+                  }
+                  // Keep legacy single preview bound to the first stream if empty
+                  const single = document.getElementById('preview');
+                  if (single && !single.srcObject) { single.srcObject = screenStream; await single.play?.(); }
+                } catch {}
+              startedAny = true;
+            } catch (e) {
+              console.error('Failed to start recorder for source', src, e);
+        try { await window.recallos?.log?.('warn', 'recorder start failed', { source: src?.id, err: String(e) }); } catch {}
+            }
+          }
+        } else if (wantMic && !wantScreen) {
+          try {
+            const mixed = new MediaStream();
+            if (!micShared) micShared = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            micShared.getAudioTracks().forEach(t => mixed.addTrack(t));
+            let rec = null;
+            try { rec = new MediaRecorder(mixed, { mimeType: 'audio/webm;codecs=opus' }); } catch { try { rec = new MediaRecorder(mixed); } catch {} }
+            const state = { rec, stream: mixed, displayId: null, displayName: 'Audio Only', lastChunkStart: Date.now() };
+            rec.ondataavailable = async (e) => {
+              try {
+                if (!e.data || e.data.size === 0) return;
+                const arrayBuf = await e.data.arrayBuffer();
+                const startedAt = state.lastChunkStart;
+                const durationMs = Date.now() - state.lastChunkStart;
+                state.lastChunkStart = Date.now();
+                await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: 'audio', codec: 'webm', ext: 'webm', audio_role, display_id: null, display_name: null });
+              } catch (err) { console.error('saveChunk failed', err); }
+            };
+            rec.onstart = async () => { recStatus.textContent = 'Recording...'; if (privacyEnabled) document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
+            rec.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
+            rec.onpause = () => { isPaused = true; recStatus.textContent = 'Paused'; };
+            rec.onresume = () => { isPaused = false; recStatus.textContent = 'Recording...'; };
+            rec.onerror = async (evt) => { try { await window.recallos?.log?.('error', 'audio-only recorder error', { message: evt?.error?.message || String(evt) }); } catch {} };
+            try { await window.recallos?.log?.('info', 'audio-only: about to start'); } catch {}
+            rec.start(5000);
+            multiRecorders.push(state);
+            try { await window.recallos?.log?.('info', 'audio-only recorder started'); } catch {}
+            startedAny = true;
+          } catch (e) {
+            alert('Could not start microphone recording.');
+            try { await window.recallos?.log?.('error', 'mic-only recorder failed', { err: String(e) }); } catch {}
+            return false;
+          }
+        }
+  // Fallback: user picker via getDisplayMedia if per-screen capture failed or no sources
+  if (!startedAny && wantScreen) {
+          try {
+            try { await window.recallos?.log?.('info', 'fallback: calling getDisplayMedia'); } catch {}
+            const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+            try {
+              const vTracks = displayStream.getVideoTracks();
+              await window.recallos?.log?.('info', 'fallback stream acquired', { tracks: vTracks.length, settings: vTracks[0] ? vTracks[0].getSettings?.() : null });
+            } catch {}
+            const mixed = new MediaStream();
+            displayStream.getVideoTracks().forEach(t => mixed.addTrack(t));
+            if (micShared) { micShared.getAudioTracks().forEach(t => mixed.addTrack(t.clone ? t.clone() : t)); }
+            let rec = null;
+            try {
+              rec = new MediaRecorder(mixed, opts);
+              try { await window.recallos?.log?.('info', 'fallback MediaRecorder created', { mime: opts.mimeType, actual: rec.mimeType }); } catch {}
+            } catch (err1) {
+              try { await window.recallos?.log?.('warn', 'fallback MediaRecorder fell back (no opts)', { err: String(err1) }); } catch {}
+              try {
+                rec = new MediaRecorder(mixed);
+                try { await window.recallos?.log?.('info', 'fallback MediaRecorder created (no opts)', { actual: rec.mimeType }); } catch {}
+              } catch (err2) {
+                try { await window.recallos?.log?.('error', 'fallback MediaRecorder creation failed', { err: String(err2) }); } catch {}
+              }
+            }
+            const state = { rec, stream: mixed, displayId: null, displayName: 'Display (picker)', lastChunkStart: Date.now() };
+            rec.ondataavailable = async (e) => {
+              try {
+                if (!e.data || e.data.size === 0) return;
+                const arrayBuf = await e.data.arrayBuffer();
+                const startedAt = state.lastChunkStart;
+                const durationMs = Date.now() - state.lastChunkStart;
+                state.lastChunkStart = Date.now();
+                await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: 'video', codec: 'webm', ext: 'webm', audio_role, display_id: null, display_name: state.displayName });
+              } catch (err) { console.error('saveChunk failed', err); }
+            };
+            rec.onstart = async () => { recStatus.textContent = 'Recording...'; if (privacyEnabled) document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
+            rec.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
+            rec.onpause = () => { isPaused = true; recStatus.textContent = 'Paused'; };
+            rec.onresume = () => { isPaused = false; recStatus.textContent = 'Recording...'; };
+            rec.start(5000);
+            multiRecorders.push(state);
+            startedAny = true;
+            // Show fallback display in preview grid and single preview
+            try {
+              const grid = document.getElementById('rec-previews');
+              if (grid) {
+                const tile = document.createElement('div');
+                tile.className = 'card';
+                tile.style.display = 'flex';
+                tile.style.flexDirection = 'column';
+                tile.style.gap = '6px';
+                const label = document.createElement('div');
+                label.textContent = 'Display (picker)';
+                label.style.fontSize = '12px';
+                label.style.color = 'var(--muted-foreground)';
+                const vid = document.createElement('video');
+                vid.autoplay = true; vid.muted = true; vid.playsInline = true; vid.controls = false;
+                vid.style.width = '100%'; vid.style.background = '#000'; vid.style.borderRadius = '6px'; vid.style.objectFit = 'contain';
+                vid.srcObject = displayStream;
+                tile.appendChild(vid);
+                tile.appendChild(label);
+                grid.appendChild(tile);
+                grid.style.display = 'grid';
+              }
+              const video = document.getElementById('preview'); if (video) { video.srcObject = displayStream; await video.play?.(); }
+            } catch {}
+          } catch (e) {
+            console.error('getDisplayMedia fallback failed', e);
+            alert('Screen picker was canceled or blocked. Please allow screen capture and try again.');
+            try { await window.recallos?.log?.('error', 'getDisplayMedia fallback failed', { err: String(e) }); } catch {}
+            return false;
+          }
+        }
+        if (!startedAny) { try { await window.recallos?.log?.('error', 'startRecording: no recorders started'); } catch {}; return false; }
+        try { await window.recallos?.log?.('info', 'startRecording: success', { count: multiRecorders.length }); } catch {}
+        return true;
       }
 
       function stopRecording() {
-        try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+        try { multiRecorders.forEach(r => { try { if (r.rec && r.rec.state !== 'inactive') r.rec.stop(); } catch {} }); } catch {}
+        multiRecorders = [];
+        try { if (micShared) { micShared.getTracks().forEach(t => t.stop()); } } catch {}
+        micShared = null;
       }
 
       document.getElementById('rec-start').addEventListener('click', async () => {
-        await startRecording();
+        if (isStarting) return;
+        isStarting = true;
+        const ok = await startRecording();
+        isStarting = false;
+        if (!ok) return;
         (document.getElementById('rec-start')).disabled = true;
         (document.getElementById('rec-stop')).disabled = false;
         (document.getElementById('rec-pause')).disabled = false;
@@ -516,41 +683,40 @@
         (document.getElementById('rec-pause')).disabled = true;
         (document.getElementById('rec-resume')).disabled = true;
         isPaused = false;
+  try { const grid = document.getElementById('rec-previews'); if (grid) { grid.innerHTML = ''; grid.style.display = 'none'; } } catch {}
       });
       document.getElementById('rec-pause').addEventListener('click', async () => {
-        try { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.pause(); } catch {}
+        try { multiRecorders.forEach(r => { try { if (r.rec && r.rec.state === 'recording') r.rec.pause(); } catch {} }); } catch {}
         (document.getElementById('rec-pause')).disabled = true;
         (document.getElementById('rec-resume')).disabled = false;
+        try { await window.recallos?.log?.('info', 'paused'); } catch {}
       });
       document.getElementById('rec-resume').addEventListener('click', async () => {
-        try { if (mediaRecorder && mediaRecorder.state === 'paused') mediaRecorder.resume(); } catch {}
+        try { multiRecorders.forEach(r => { try { if (r.rec && r.rec.state === 'paused') r.rec.resume(); } catch {} }); } catch {}
         (document.getElementById('rec-pause')).disabled = false;
         (document.getElementById('rec-resume')).disabled = true;
+        try { await window.recallos?.log?.('info', 'resumed'); } catch {}
       });
 
   // Settings actions moved to Settings window
 
       // Bind the preview stream to be used for recording too
   (async () => {
-        // First-run wizard and consent handling
+        // Unified first-run + consent handling
         const settings = await window.recallos?.getSettings?.();
-        const isFirst = !settings || !settings.first_run_completed;
-        const consentSeen = settings && settings.consent_ack === '1';
-        const consentEl = document.getElementById('consent');
+        const needsFirstRun = !settings || !settings.first_run_completed;
+        const needsConsent = !settings || settings.consent_ack !== '1';
         const frEl = document.getElementById('first-run');
-        if (!consentSeen && consentEl) {
-          consentEl.style.display = 'flex';
-          document.getElementById('consent-accept').addEventListener('click', async () => {
-            consentEl.style.display = 'none';
-            try { await window.recallos?.setSetting?.('consent_ack', '1'); } catch {}
-          });
-          document.getElementById('consent-decline').addEventListener('click', () => { window.close(); });
-        }
-        if (isFirst && frEl) {
+        if ((needsFirstRun || needsConsent) && frEl) {
           frEl.style.display = 'flex';
           const dirSpan = document.getElementById('fr-data-dir');
           const setMsg = (m) => { const el = document.getElementById('fr-msg'); if (el) el.textContent = m; };
           if (settings?.data_dir) dirSpan.textContent = settings.data_dir;
+          const consentCb = document.getElementById('fr-consent');
+          const finishBtn = document.getElementById('fr-finish');
+          const updateFinish = () => { finishBtn.disabled = !(consentCb && consentCb.checked); };
+          consentCb?.addEventListener('change', updateFinish);
+          updateFinish();
           document.getElementById('fr-choose-dir').addEventListener('click', async () => {
             const res = await window.recallos?.chooseDirectory?.();
             if (res?.ok && res.path) {
@@ -578,6 +744,8 @@
           });
           document.getElementById('fr-cancel').addEventListener('click', () => window.close());
           document.getElementById('fr-finish').addEventListener('click', async () => {
+            // Require consent, then mark first-run complete
+            try { await window.recallos?.setSetting?.('consent_ack', (document.getElementById('fr-consent')).checked ? '1' : '0'); } catch {}
             try { await window.recallos?.setSetting?.('first_run_completed', '1'); } catch {}
             frEl.style.display = 'none';
           });
@@ -652,10 +820,8 @@
     const opt = Array.from(micSelect.options).find(o => o.value === micDevicePref); if (opt) micSelect.value = micDevicePref;
   } catch {}
 
-  // Settings-related handlers removed (now in Settings window)
-  byId('cap-screen')?.addEventListener('change', async () => { await set('capture_screen', byId('cap-screen').checked ? 'on' : 'off'); });
-  byId('cap-mic')?.addEventListener('change', async () => { await set('capture_mic', byId('cap-mic').checked ? 'on' : 'off'); });
-  micSelect?.addEventListener('change', async () => { micDevicePref = micSelect.value; await set('mic_device_id', micDevicePref); });
+  // Settings-related handlers moved to Settings window
+  micSelect?.addEventListener('change', async () => { micDevicePref = micSelect.value; try { await window.recallos?.setSetting?.('mic_device_id', micDevicePref); } catch {} });
       })();
 
       // --- Search wiring ---

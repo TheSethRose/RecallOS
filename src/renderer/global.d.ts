@@ -15,7 +15,7 @@ declare global {
   openScreenRecordingSettings: () => Promise<{ ok: boolean; error?: string }>;
   listCaptureSources: (types?: Array<'screen' | 'window'>) => Promise<Array<{ id: string; name: string; kind: 'screen' | 'window' | 'unknown'; displayId: string | null; thumbnail: string | null }>>;
   detectSystemAudio: () => Promise<{ platform: string; detected: boolean; hint?: string }>;
-  saveChunk: (buffer: ArrayBuffer, meta: { startedAt?: number; durationMs?: number; type?: string; width?: number; height?: number; sample_rate?: number; channel_layout?: string; codec?: string; ext?: string; audio_role?: string }) => Promise<{ ok: boolean; id?: number | null; path?: string; error?: string }>;
+  saveChunk: (buffer: ArrayBuffer, meta: { startedAt?: number; durationMs?: number; type?: string; width?: number; height?: number; sample_rate?: number; channel_layout?: string; codec?: string; ext?: string; audio_role?: string; display_id?: string | null; display_name?: string | null }) => Promise<{ ok: boolean; id?: number | null; path?: string; error?: string }>;
   listAudioDevices: () => Promise<Array<{ deviceId: string; label: string }>>;
   setRecordingIndicator: (active: boolean) => Promise<{ ok: boolean; error?: string }>;
   getMoment: (payload: { chunk_id: number; ts_ms: number }) => Promise<{ ok: true; path: string; absMs: number } | { ok: false; error: string }>;

@@ -50,17 +50,56 @@ export function recommendFFmpegVideoEncoder(caps: FFmpegCaps): { videoCodec: str
 export async function repairWebmInPlace(inputPath: string): Promise<{ ok: boolean; error?: string }> {
   const ff = resolveFFmpeg();
   if (!ff) return { ok: false, error: 'ffmpeg-missing' };
+  // Do not attempt to repair files already quarantined
+  if (/_corrupt\//.test(inputPath)) return { ok: false, error: 'quarantined-skip' };
+  // Skip our own temporary repair artifacts
+  if (/\/\.__repair_/.test(inputPath)) return { ok: false, error: 'temp-skip' };
+  try {
+    const st0 = await fsp.stat(inputPath);
+    // If file is extremely small, it's not a valid WebM (EBML header alone is > 32 bytes)
+    if (!st0 || st0.size < 1024) return { ok: false, error: 'too-small' };
+  } catch {}
   const dir = dirname(inputPath);
   const tmpOut = join(dir, `.__repair_${Date.now()}.webm`);
   try {
-    await execFileAsync(ff, ['-hide_banner', '-y', '-fflags', '+genpts', '-i', inputPath, '-map', '0', '-c', 'copy', '-f', 'webm', tmpOut], { timeout: 20000 });
+    await execFileAsync(
+      ff,
+      [
+        '-hide_banner',
+        '-v', 'error', // suppress non-critical noise
+        '-nostats',
+        '-y',
+        '-fflags', '+genpts',
+        '-i', inputPath,
+        // map all available streams defensively
+        '-map', '0',
+        '-c', 'copy',
+        '-f', 'webm',
+        tmpOut,
+      ],
+      { timeout: 20000 }
+    );
     const st = await fsp.stat(tmpOut).catch(() => null);
     if (!st || st.size <= 0) throw new Error('empty-output');
     await fsp.rename(tmpOut, inputPath);
     return { ok: true };
   } catch (e: any) {
     try { await fsp.rm(tmpOut, { force: true }); } catch {}
-  return { ok: false, error: e?.message || String(e) };
+    // Normalize common ffmpeg stderr patterns for friendlier logging
+    const stderr: string = e?.stderr || '';
+    let code = e?.message || String(e);
+    if (/EBML header parsing failed/i.test(stderr) || /Invalid data found when processing input/i.test(stderr)) {
+      code = 'invalid-webm';
+    } else if (/timed out|timeout/i.test(code)) {
+      code = 'timeout';
+    } else if (/No such file or directory/i.test(stderr)) {
+      code = 'missing-input';
+    } else if (/Format .* detected only with low score/i.test(stderr)) {
+      code = 'format-uncertain';
+    } else if (/End of file|Truncated/i.test(stderr)) {
+      code = 'truncated-webm';
+    }
+    return { ok: false, error: code };
   }
 }
 
@@ -71,8 +110,13 @@ export async function listRecentWebmFiles(root: string, sinceEpochMs: number): P
       const entries = await fsp.readdir(p, { withFileTypes: true });
       for (const e of entries) {
         const full = join(p, e.name);
-        if (e.isDirectory()) await walk(full);
-        else if (e.isFile() && e.name.toLowerCase().endsWith('.webm')) {
+        // Skip quarantine and hidden/temp dirs
+        if (e.isDirectory()) {
+          if (e.name.startsWith('_') || e.name.startsWith('.')) continue;
+          await walk(full);
+        } else if (e.isFile() && e.name.toLowerCase().endsWith('.webm')) {
+          // Skip our temporary repair artifacts
+          if (e.name.startsWith('.__repair_')) continue;
           const st = await fsp.stat(full);
           if (st.mtimeMs >= sinceEpochMs) out.push(full);
         }

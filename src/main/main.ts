@@ -44,6 +44,35 @@ function createWindow() {
 
   // When built, index.html is copied into dist/renderer
   win.loadFile(join(__dirname, '../renderer/index.html'));
+
+  // Honor background-minimize preference on window close
+  try {
+    win.on('close', (evt) => {
+      try {
+        // Only intercept for the main window; skip on explicit app quit
+        if ((app as any)._recallosQuitting) return;
+        const db = (app as any)._recallosDb;
+        let pref: string | null = null;
+        try {
+          // Use in-memory cache when available to avoid sync DB hit
+          if ((app as any)._recallosBgMinPref != null) {
+            pref = (app as any)._recallosBgMinPref;
+          } else {
+            const row = db?.prepare?.('SELECT value FROM settings WHERE key = ?').get('background_minimize');
+            pref = row?.value || null;
+            (app as any)._recallosBgMinPref = pref;
+          }
+        } catch {}
+        const enabled = String(pref || 'off') === 'on';
+        if (enabled) {
+          evt.preventDefault();
+          try { win.minimize(); } catch {}
+          try { win.hide(); } catch {}
+          return;
+        }
+      } catch {}
+    });
+  } catch {}
 }
 
 app.whenReady().then(async () => {
@@ -99,6 +128,26 @@ app.whenReady().then(async () => {
     const caps = detectGpuBackend();
     console.log('GPU:', caps.backend, caps.reason || '');
     (app as any)._recallosGpuCaps = caps;
+  } catch {}
+
+  // IPC: list capture sources (screens/windows)
+  try {
+    ipcMain.handle('recallos:capture:listSources', async (_evt, payload) => {
+      try {
+        const types = (payload?.types && Array.isArray(payload.types) && payload.types.length) ? payload.types : ['screen', 'window'];
+        const sources = await desktopCapturer.getSources({ types: types as any, thumbnailSize: { width: 320, height: 200 } });
+        return sources.map((s) => ({
+          id: s.id,
+          name: s.name,
+          kind: s.id?.startsWith('screen:') ? 'screen' : (s.id?.startsWith('window:') ? 'window' : 'unknown'),
+          displayId: (s as any).display_id || (s as any).displayId || null,
+          thumbnail: s.thumbnail?.toDataURL?.() || null,
+        }));
+      } catch (e) {
+        console.warn('listSources failed:', e);
+        return [];
+      }
+    });
   } catch {}
  
   // Open application database (encrypted if SQLCipher is linked and passphrase provided)
@@ -364,21 +413,36 @@ app.whenReady().then(async () => {
     const chunksRoot = join(app.getPath('userData'), 'chunks');
     const since = Date.now() - 60 * 60 * 1000; // last hour
     const files = await listRecentWebmFiles(chunksRoot, since);
+    const now = Date.now();
+    let scanned = 0, repaired = 0, quarantined = 0, skippedRecent = 0, failed = 0;
     for (const f of files) {
+      // Skip already quarantined or temp repair artifacts
+      if (f.includes('/_corrupt/') || f.includes('/.__repair_')) continue;
+      scanned++;
+      try {
+        const st = await fsp.stat(f).catch(() => null);
+        if (st && now - st.mtimeMs < 120_000) { skippedRecent++; continue; } // skip files modified within last 2 minutes
+      } catch {}
       const res = await repairWebmInPlace(f);
+      if (res.ok) { repaired++; continue; }
       if (!res.ok && res.error && res.error !== 'ffmpeg-missing') {
-        console.warn('Chunk repair failed:', f, res.error);
+        // Ignore benign skip signals
+        if (res.error === 'quarantined-skip' || res.error === 'temp-skip' || res.error === 'too-small') continue;
+        failed++;
         try {
           // Quarantine the file to avoid repeated repair attempts
           const qDir = join(chunksRoot, '_corrupt');
           await fsp.mkdir(qDir, { recursive: true });
           const target = join(qDir, `${Date.now()}-${Math.random().toString(36).slice(2,8)}-${f.split('/').pop()}`);
           await fsp.rename(f, target);
-          console.warn('Quarantined corrupt chunk:', target);
+          quarantined++;
         } catch (e) {
           console.warn('Failed to quarantine corrupt chunk:', f, e);
         }
       }
+    }
+    if (scanned > 0) {
+      console.warn(`Chunk repair summary: scanned=${scanned}, repaired=${repaired}, quarantined=${quarantined}, skippedRecent=${skippedRecent}, failed=${failed}`);
     }
   } catch (e) {
     console.warn('Chunk auto-repair scan failed:', e);
@@ -500,7 +564,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Calendar: import .ics files (stage locally only; no DB writes)
+  // Calendar: import .ics files (parse and upsert events, also stage copies)
   ipcMain.handle('recallos:calendar:importIcs', async () => {
     try {
       const res = await dialog.showOpenDialog({
@@ -518,11 +582,18 @@ app.whenReady().then(async () => {
         if (row?.value && typeof row.value === 'string' && row.value.length > 0) baseDir = row.value;
       } catch {}
 
-      const importsDir = join(baseDir, 'calendar', 'imports');
-      try { await fsp.mkdir(importsDir, { recursive: true }); } catch {}
+  const calDir = join(baseDir, 'calendar');
+  const importsDir = join(calDir, 'imports');
+  try { await fsp.mkdir(importsDir, { recursive: true }); } catch {}
+  try { await fsp.mkdir(calDir, { recursive: true }); } catch {}
+
+  // Prepare events upsert (dedupe via unique source key)
+  try { db?.prepare?.('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source ON events(source)').run(); } catch {}
+  const insertEv = db?.prepare?.('INSERT OR REPLACE INTO events(title, location, started_at, ended_at, source) VALUES(?,?,?,?,?)');
+  const { parseICS } = require('../util/ics');
 
       const MAX = 10 * 1024 * 1024; // 10 MB
-      let imported = 0;
+  let imported = 0;
 
       for (const src of res.filePaths) {
         try {
@@ -546,14 +617,35 @@ app.whenReady().then(async () => {
             continue;
           }
 
-          // Copy to staged imports with unique name
+          // Parse ICS and upsert events
+          let content = '';
+          try { content = await fsp.readFile(src, 'utf8'); } catch {}
+          if (content) {
+            try {
+              const evs = parseICS(content) || [];
+              const fileKey = orig.replace(/[^a-z0-9._-]/gi,'_').toLowerCase();
+              for (const ev of evs) {
+                try {
+                  const title = ev?.title || null;
+                  const location = ev?.location || null;
+                  const started_at = Math.max(0, Number(ev?.dtStart||0)) || 0;
+                  const ended_at = Math.max(started_at, Number(ev?.dtEnd||started_at)) || started_at;
+                  const uid = (ev?.uid || '').toString().trim();
+                  const srcKey = uid ? `ics:${fileKey}#${uid}` : `ics:${fileKey}#${started_at}:${ended_at}:${(title||'').slice(0,64)}`;
+                  insertEv?.run(title, location, started_at, ended_at, srcKey);
+                } catch {}
+              }
+            } catch (e: any) {
+              try { logWarn(`ICS parse failed: ${orig}: ${e?.message || String(e)}`); } catch {}
+            }
+          }
+
+          // Copy to staged imports with unique name (keep provenance)
           const fname = `${Date.now()}-${Math.random().toString(36).slice(2,8)}-${orig}`;
           const dest = join(importsDir, fname);
           await fsp.copyFile(src, dest);
           imported++;
-
-          // No DB writes or queue jobs in T-083 scope
-          try { logInfo(`ICS staged: ${dest}`); } catch {}
+          try { logInfo(`ICS imported: ${dest}`); } catch {}
         } catch (e: any) {
           try { logError(`ICS import failed: ${e?.message || String(e)}`); } catch {}
         }
@@ -629,6 +721,10 @@ app.whenReady().then(async () => {
               if (win && !win.isDestroyed()) win.setTitle('RecallOS');
             } catch {}
           }
+        }
+        // Cache background minimize preference for fast access on close
+        else if (payload.key === 'background_minimize') {
+          try { (app as any)._recallosBgMinPref = String(payload.value || 'off'); } catch {}
         }
       } catch {}
       return { ok: true };
@@ -1111,7 +1207,86 @@ app.whenReady().then(async () => {
     const windowLike = typeof payload?.window === 'string' && payload.window ? payload.window : null;
     if (!q) return [];
     const db = (app as any)._recallosDb;
-    // Helper to build a time-window snippet around a hit using nearby rows in same chunk
+    // Helpers: token extraction and highlighter
+    const extractTokens = (input: string): Array<{ t: string; prefix: boolean } | { phrase: string }> => {
+      const tokens: Array<{ t: string; prefix: boolean } | { phrase: string }> = [];
+      try {
+        // Pull phrases in quotes first
+        const phraseRe = /"([^"]+)"/g;
+        let pm: RegExpExecArray | null;
+        const seen = new Set<string>();
+        while ((pm = phraseRe.exec(input)) !== null) {
+          const phrase = (pm[1] || '').trim();
+          if (phrase && !seen.has(`p:${phrase.toLowerCase()}`)) { tokens.push({ phrase }); seen.add(`p:${phrase.toLowerCase()}`); }
+        }
+        // Remove phrases to avoid splitting inside them
+        const scrubbed = input.replace(/"[^"]+"/g, ' ').trim();
+        for (const raw of scrubbed.split(/\s+/)) {
+          if (!raw) continue;
+          const up = raw.toUpperCase();
+          if (up === 'AND' || up === 'OR') continue;
+          const isPrefix = raw.endsWith('*');
+          const base = (isPrefix ? raw.slice(0, -1) : raw).trim();
+          if (!base) continue;
+          const key = `t:${isPrefix ? base.toLowerCase() + '*' : base.toLowerCase()}`;
+          if (seen.has(key)) continue;
+          tokens.push({ t: base, prefix: isPrefix });
+          seen.add(key);
+        }
+      } catch {}
+      // Limit to a reasonable number to avoid pathological regex time
+      return tokens.slice(0, 16);
+    };
+    const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mergeRanges = (ranges: Array<[number, number]>): Array<[number, number]> => {
+      if (!ranges.length) return ranges;
+      ranges.sort((a, b) => a[0] - b[0]);
+      const out: Array<[number, number]> = [ranges[0]];
+      for (let i = 1; i < ranges.length; i++) {
+        const [s, e] = ranges[i];
+        const last = out[out.length - 1];
+        if (s <= last[1]) last[1] = Math.max(last[1], e); else out.push([s, e]);
+      }
+      return out;
+    };
+    const highlightAll = (text: string, tokens: ReturnType<typeof extractTokens>): string => {
+      try {
+        if (!tokens.length || !text) return text;
+        const ranges: Array<[number, number]> = [];
+        for (const tk of tokens) {
+          if ('phrase' in tk) {
+            const re = new RegExp(escapeReg(tk.phrase), 'gi');
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(text)) !== null) {
+              ranges.push([m.index, m.index + m[0].length]);
+              if (m.index === re.lastIndex) re.lastIndex++; // avoid zero-length loops
+            }
+          } else {
+            const s = tk.t;
+            if (!s) continue;
+            const re = tk.prefix ? new RegExp(escapeReg(s) + '\\S*', 'gi') : new RegExp(escapeReg(s), 'gi');
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(text)) !== null) {
+              ranges.push([m.index, m.index + m[0].length]);
+              if (m.index === re.lastIndex) re.lastIndex++;
+            }
+          }
+        }
+        if (!ranges.length) return text;
+        const merged = mergeRanges(ranges);
+        let out = '';
+        let pos = 0;
+        for (const [s, e] of merged) {
+          if (s > pos) out += text.slice(pos, s);
+          out += '[' + text.slice(s, e) + ']';
+          pos = e;
+        }
+        if (pos < text.length) out += text.slice(pos);
+        return out;
+      } catch { return text; }
+    };
+    const tokens = extractTokens(q);
+    // Helper to build a time-window snippet around a hit using nearby rows in same chunk and highlight tokens
     const buildTimeSnippet = (row: any): string | null => {
       try {
         if (!windowSecs || !db?.prepare) return null;
@@ -1122,17 +1297,18 @@ app.whenReady().then(async () => {
         const rowsCtx = stmt?.all(row.chunk_id, start, end) || [];
         if (!rowsCtx.length) return null;
         const glue = ' … ';
-        const combined = rowsCtx.map((r: any) => String(r.text || '')).join(glue);
-        const lower = combined.toLowerCase();
-        const qLower = q.toLowerCase();
-        const idx = lower.indexOf(qLower);
-        if (idx >= 0) {
-          const pre = combined.slice(0, idx);
-          const mid = combined.slice(idx, idx + q.length);
-          const post = combined.slice(idx + q.length);
-          return `${pre}[${mid}]${post}`;
-        }
-        return combined.length > windowChars * 2 ? combined.slice(0, windowChars * 2) + ' …' : combined;
+        const combinedRaw = rowsCtx.map((r: any) => String(r.text || '')).join(glue);
+        const highlighted = highlightAll(combinedRaw, tokens);
+        // Trim overly long snippets to ~2*windowChars while preserving highlights
+        if (highlighted.length <= windowChars * 2) return highlighted;
+        // Find first highlight marker to center around
+        const first = highlighted.indexOf('[');
+        if (first < 0) return highlighted.slice(0, windowChars * 2) + ' …';
+        const startCut = Math.max(0, first - windowChars);
+        const endCut = Math.min(highlighted.length, first + windowChars);
+        const prefix = startCut > 0 ? '… ' : '';
+        const suffix = endCut < highlighted.length ? ' …' : '';
+        return prefix + highlighted.slice(startCut, endCut) + suffix;
       } catch { return null; }
     };
     // Try FTS5 snippet first with filters and ranking identical to search()
@@ -1218,6 +1394,7 @@ app.whenReady().then(async () => {
               snippet: buildTimeSnippet(r) || r.snippet,
             }));
           }
+          // When not using time-window, still ensure multiple tokens are highlighted if FTS snippet is unavailable
           return rows;
         }
       }
@@ -1268,16 +1445,15 @@ app.whenReady().then(async () => {
         return rows.map((r: any) => ({
           snippet: buildTimeSnippet(r) || ((): string => {
             const content = String(r.content || '');
-            const idx = content.toLowerCase().indexOf(q.toLowerCase());
-            if (idx < 0) return content.slice(0, windowChars * 2);
-            const start = Math.max(0, idx - windowChars);
-            const end = Math.min(content.length, idx + q.length + windowChars);
-            const pre = content.slice(start, idx);
-            const mid = content.slice(idx, idx + q.length);
-            const post = content.slice(idx + q.length, end);
+            const highlighted = highlightAll(content, tokens);
+            if (highlighted.length <= windowChars * 2) return highlighted;
+            const first = highlighted.indexOf('[');
+            if (first < 0) return highlighted.slice(0, windowChars * 2) + ' …';
+            const start = Math.max(0, first - windowChars);
+            const end = Math.min(highlighted.length, first + windowChars);
             const ellipsisPre = start > 0 ? '… ' : '';
-            const ellipsisPost = end < content.length ? ' …' : '';
-            return `${ellipsisPre}${pre}[${mid}]${post}${ellipsisPost}`;
+            const ellipsisPost = end < highlighted.length ? ' …' : '';
+            return `${ellipsisPre}${highlighted.slice(start, end)}${ellipsisPost}`;
           })(),
           type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms,
           app_bundle: r.app_bundle, app_name: r.app_name, window_title: r.window_title,
@@ -1285,16 +1461,15 @@ app.whenReady().then(async () => {
       }
       return rows.map((r: any) => {
         const content = String(r.content || '');
-        const idx = content.toLowerCase().indexOf(q.toLowerCase());
-        if (idx < 0) return { snippet: content.slice(0, windowChars * 2), type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms };
-        const start = Math.max(0, idx - windowChars);
-        const end = Math.min(content.length, idx + q.length + windowChars);
-        const pre = content.slice(start, idx);
-        const mid = content.slice(idx, idx + q.length);
-        const post = content.slice(idx + q.length, end);
+        const highlighted = highlightAll(content, tokens);
+        if (highlighted.length <= windowChars * 2) return { snippet: highlighted, type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms };
+        const first = highlighted.indexOf('[');
+        if (first < 0) return { snippet: highlighted.slice(0, windowChars * 2) + ' …', type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms };
+        const start = Math.max(0, first - windowChars);
+        const end = Math.min(highlighted.length, first + windowChars);
         const ellipsisPre = start > 0 ? '… ' : '';
-        const ellipsisPost = end < content.length ? ' …' : '';
-        return { snippet: `${ellipsisPre}${pre}[${mid}]${post}${ellipsisPost}`, type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms };
+        const ellipsisPost = end < highlighted.length ? ' …' : '';
+        return { snippet: `${ellipsisPre}${highlighted.slice(start, end)}${ellipsisPost}`, type: r.type, chunk_id: r.chunk_id, ts_ms: r.ts_ms };
       });
     } catch {
       return [];
@@ -1630,11 +1805,13 @@ app.whenReady().then(async () => {
       const type = typeof payload.type === 'string' ? payload.type : 'video';
       const width = Number(payload.width || 0) || null;
       const height = Number(payload.height || 0) || null;
-      const sample_rate = Number(payload.sample_rate || 0) || null;
+  const sample_rate = Number(payload.sample_rate || 0) || null;
       const channel_layout = typeof payload.channel_layout === 'string' ? payload.channel_layout : null;
   const codec = typeof payload.codec === 'string' ? payload.codec : 'webm';
       const ext = typeof payload.ext === 'string' ? payload.ext : 'webm';
   const audio_role = typeof payload.audio_role === 'string' ? payload.audio_role : undefined;
+  const display_id = typeof payload.display_id === 'string' ? payload.display_id : (payload.display_id == null ? null : String(payload.display_id));
+  const display_name = typeof payload.display_name === 'string' ? payload.display_name : (payload.display_name == null ? null : String(payload.display_name));
 
       // Enforce per-app defaults: if current app is opted-out, skip saving
       try {
@@ -1670,9 +1847,9 @@ app.whenReady().then(async () => {
       
       let id: number | null = null;
       try {
-        const stmt = db.prepare?.(`INSERT INTO media_chunks(path, type, started_at, duration_ms, codec, width, height, sample_rate, channel_layout)
-                                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-        const res = stmt?.run(filePath, type, Math.floor(startedAtMs/1000), durationMs, codec, width, height, sample_rate, channel_layout);
+  const stmt = db.prepare?.(`INSERT INTO media_chunks(path, type, started_at, duration_ms, codec, width, height, sample_rate, channel_layout, display_id, display_name)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const res = stmt?.run(filePath, type, Math.floor(startedAtMs/1000), durationMs, codec, width, height, sample_rate, channel_layout, display_id, display_name);
         const row = db.prepare?.('SELECT last_insert_rowid() AS id').get();
         id = row?.id ?? null;
         // Enqueue indexing job for this chunk (stub handler will succeed)
@@ -1690,6 +1867,22 @@ app.whenReady().then(async () => {
         }
       } catch {}
       return { ok: true, id, path: filePath };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Logger IPC
+  ipcMain.handle('recallos:log', async (_evt, payload: any) => {
+    try {
+      const lvl = String(payload?.level || 'info').toLowerCase();
+      const msg = String(payload?.message || '');
+      const meta = payload?.meta ? ` ${JSON.stringify(payload.meta)}` : '';
+      const line = `[renderer] ${msg}${meta}`;
+      if (lvl === 'warn') { console.warn(line); try { logWarn(line); } catch {} }
+      else if (lvl === 'error') { console.error(line); try { logError(line); } catch {} }
+      else { console.log(line); try { logInfo(line); } catch {} }
+      return { ok: true };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e) };
     }
@@ -1729,3 +1922,8 @@ app.on('window-all-closed', () => {
   try { const t = (app as any)._recallosAppTrackTimer as any; if (t) clearInterval(t); } catch {}
   if (process.platform !== 'darwin') app.quit();
 });
+
+// Track explicit quit so close handler can allow shutdown
+try {
+  app.on('before-quit', () => { try { (app as any)._recallosQuitting = true; } catch {} });
+} catch {}

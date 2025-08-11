@@ -73,6 +73,7 @@
 - [x] [T-058] Validate FFmpeg flags for hardware acceleration
 - [x] [T-059] Persist chunk metadata into `media_chunks`
 - [x] [T-060] Add auto-rotation/repair for partial chunks on crash
+ - [x] [T-205] Capture multiple displays concurrently; tag chunks with display metadata
 
 ## Phase 6 — OCR Pipeline (Tesseract)
 - [x] [T-061] Decide OCR frequency for performance
@@ -104,8 +105,8 @@
 
 ## Phase 9 — Calendar Integration
 - [x] [T-083] Provide local ICS file import for calendar events — Added ICS import entry point (UI+IPC); staging only. Parsing and de-dupe follow in T-084.
-- [ ] [T-084] Parse events into `events` table; de-duplicate
-- [ ] [T-085] UI toggle to show calendar overlays on timeline
+ - [x] [T-084] Parse events into `events` table; de-duplicate
+ - [x] [T-085] UI toggle to show calendar overlays on timeline
 - [ ] [T-086] Add native calendar integrations (later)
 
 ## Phase 10 — Indexing, Search API, and Query UX
@@ -114,11 +115,13 @@
 - [x] [T-089] Add filters: by date range, speaker, and content type
 - [x] [T-090] Add filters: by app/window
 - [x] [T-091] Ranking: prioritize recent hits, window-title matches, and phrases
-- [ ] [T-092] Add snippet generator around hits (± N seconds; highlight tokens)
+- [x] [T-092] Add snippet generator around hits (± N seconds; highlight tokens)
 - [x] [T-093] Add basic snippet generator (± N characters)
 - [x] [T-094] Add pagination for results
 - [x] [T-095] Build “jump to moment” action
 - [x] [T-096] Add saved searches
+
+- [ ] [T-209] Consolidate snippet generators into a single utility module and update references — merge T-092/T-093 implementations into one
 
 ## Phase 11 — Timeline & Playback UI
 - [x] [T-097] Basic VS Code–style theming with light/dark switcher
@@ -134,6 +137,9 @@
 - [ ] [T-107] Keyboard navigation: jump hits, change playback speed
 - [ ] [T-108] Error UI for missing chunk files
 
+- [ ] [T-210] Scaffold global search bar with debounced input (advances T-098)
+- [ ] [T-211] Prototype timeline scrubber (minimal) to satisfy MVP (advances T-100)
+
 ## Phase 12 — Settings Window Consolidation
 - [x] [T-191] Create dedicated Settings window with tabs (General, Capture, Storage, Calendar, Security, Analytics, Export, Apps)
 - [x] [T-192] Move General settings (theme, start on login, privacy indicator)
@@ -147,6 +153,10 @@
 - [x] [T-200] Add “Settings…” entry point in top bar; IPC to open/focus Settings window
 - [x] [T-201] Remove legacy settings UI from main page
 - [x] [T-202] Update documentation/screenshots to reflect Settings window and tabs
+ - [x] [T-203] Externalize Settings scripts and tighten CSP (remove 'unsafe-inline' for scripts; move logic to `src/renderer/settings.js`)
+ 
+- [ ] [T-213] Add CSP audit script to ensure no inline scripts remain after migration (follow-up to T-203)
+ 
 
 ## Phase 13 — Settings & Controls
 - [x] [T-109] Theme preference persisted across sessions
@@ -179,6 +189,7 @@
 - [ ] [T-132] Fragmentation control for media folder
 - [ ] [T-133] Crash-safe writes
 - [x] [T-134] Corrupt chunk quarantine
+- [x] [T-204] Harden chunk auto-repair: skip `_corrupt` and temp files; quiet ffmpeg logs; normalize errors
 - [ ] [T-135] Unit tests for DB access/migrations/queries
 - [ ] [T-136] Integration tests across OSes
 - [ ] [T-137] Load tests with synthetic data
@@ -194,6 +205,9 @@
 - [ ] [T-145] Threat model documentation
 - [ ] [T-146] Clear consent language
 
+- [ ] [T-208] Add lint rule/script to prevent logging secrets (e.g., accidental console.log of sensitive data) in production builds
+- [ ] [T-214] Write privacy policy markdown summarizing data collection, encryption, and consent language (align with T-146)
+
 ## Phase 17 — Cross-Platform Packaging & Distribution
 - [ ] [T-147] Configure `electron-builder` targets
 - [ ] [T-148] Bundle binaries and models with builds
@@ -202,6 +216,8 @@
 - [ ] [T-151] App auto-update support
 - [ ] [T-152] Minimal system requirements page
 - [ ] [T-153] Smoke-test installers on all OSes
+
+- [ ] [T-212] Add `electron-builder` config and CI packaging steps (macOS notarization, Windows signing, Linux targets)
 
 ## Phase 18 — Documentation & Onboarding
 - [ ] [T-154] Update `README.md` with screenshots/gifs
@@ -214,6 +230,9 @@
 - [ ] [T-161] Write “Releasing” doc
 - [ ] [T-162] Add example datasets
 - [ ] [T-163] Add issue labels and roadmap board
+
+- [ ] [T-206] Document required native build tools for `better-sqlite3` and SQLCipher in README (macOS/Windows/Linux)
+- [ ] [T-207] Document binary download URLs, SHA256 verification, and system-binary fallback for FFmpeg/Tesseract/Whisper
 
 ## Phase 19 — Analytics & Activity Statistics
 - [ ] [T-164] Build SQL views for activity stats
@@ -255,3 +274,13 @@
 - [ ] [T-188] Filter by app/window and by speaker (“me”/“others”)
 - [ ] [T-189] Database is encrypted; passphrase required on restart; pause/resume works reliably
 - [ ] [T-190] Installers for macOS/Windows/Linux produced by CI and verified in fresh VMs
+
+---
+
+## Changelog
+<2025-08-11 11:20 America/Chicago> — T-206, T-207, T-208, T-209, T-210, T-211, T-212, T-213, T-214 — Added tasks from report.md to appropriate phases — by maintainer
+<2025-08-11 11:05 America/Chicago> — T-205 — Implemented multi-display capture (one MediaRecorder per screen) and persisted display_id/display_name; added DB migration 0005 — by maintainer
+<2025-08-11 10:22 America/Chicago> — T-092 — Implemented time-window snippet generator with multi-token highlighting (phrases, words, prefixes) for OCR and transcripts — by maintainer
+<2025-08-11 10:15 America/Chicago> — T-119 — Added “Minimize to background on close” setting and main-window interception to honor it — by maintainer
+<2025-08-10 14:35 America/Chicago> — T-203, T-204 — Moved inline Settings JS to external file and tightened CSP; improved ffmpeg repair to skip quarantined/temp files and normalized error logging — by maintainer
+<2025-08-10 14:47 America/Chicago> — T-084, T-085 — ICS import now parses and upserts events with de-duplication; Calendar overlays toggle wired in Settings — by maintainer
