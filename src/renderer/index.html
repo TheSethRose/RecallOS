@@ -98,6 +98,7 @@
             <option value="light">Light</option>
             <option value="dark">Dark</option>
           </select>
+          <button id="open-settings" title="Open Settings window">Settings…</button>
         </div>
       </div>
       <div id="rec-badge">REC</div>
@@ -187,6 +188,10 @@
           <span id="rec-status"></span>
         </div>
         <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+          <label for="cap-screen" style="margin-left:0;">Capture Screen</label>
+          <input id="cap-screen" type="checkbox" checked />
+          <label for="cap-mic" style="margin-left:8px;">Capture Mic</label>
+          <input id="cap-mic" type="checkbox" checked />
           <label for="mic-select">Mic:</label>
           <select id="mic-select"></select>
           <label for="mic-role" style="margin-left:8px;">Tag as:</label>
@@ -213,6 +218,8 @@
           <button id="stt-model-apply">Apply</button>
         </div>
       </section>
+      <hr />
+  <!-- Settings moved to Settings window. Use the Settings… button in the top bar. -->
       <hr />
       <section>
         <h3>Search</h3>
@@ -242,30 +249,14 @@
           <button id="search-next">Next</button>
           <span id="search-page" style="align-self:center; color:#555;"></span>
         </div>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">
+          <button id="export-json">Export Results (JSON)</button>
+          <button id="export-csv">Export Results (CSV)</button>
+          <span class="muted">Exports the current page of results.</span>
+        </div>
       </section>
       <hr />
-      <section>
-        <h3>Per-app Defaults</h3>
-        <p style="color:#555;">Set default capture behavior per app (bundle ID or executable name). This config is stored locally.</p>
-        <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin-bottom:8px;">
-          <input id="app-key" placeholder="com.apple.Safari or chrome.exe" style="min-width:260px; padding:6px;" />
-          <select id="app-default">
-            <option value="on">Capture by default</option>
-            <option value="off">Do not capture by default</option>
-          </select>
-          <button id="app-add">Add / Update</button>
-        </div>
-        <div class="card" style="margin-bottom:8px;">
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
-            <span class="muted">Current app:</span>
-            <code id="curr-app" style="flex:1;">(unknown)</code>
-            <input id="app-rename-bundle" placeholder="Bundle/exe to rename" style="min-width:220px;" />
-            <input id="app-rename-name" placeholder="Friendly name" style="min-width:220px;" />
-            <button id="app-rename">Rename App</button>
-          </div>
-        </div>
-        <div id="app-list" style="display:flex; flex-direction:column; gap:6px;"></div>
-      </section>
+  <!-- Per-app Defaults moved to Settings → Apps tab -->
     </div>
     <script>
       // Minimal smoke test
@@ -294,6 +285,11 @@
         const val = themeSelect.value;
         applyTheme(val);
         try { await window.recallos?.setSetting?.('theme', val); } catch {}
+      });
+
+      // Settings window opener
+      document.getElementById('open-settings')?.addEventListener('click', () => {
+        try { window.recallos?.openSettings?.(); } catch {}
       });
 
       const permOut = document.getElementById('perm-out');
@@ -407,6 +403,10 @@
   let isPaused = false;
       const recStatus = document.getElementById('rec-status');
       const micSelect = document.getElementById('mic-select');
+      const capScreenEl = document.getElementById('cap-screen');
+      const capMicEl = document.getElementById('cap-mic');
+      let privacyEnabled = true;
+      let micDevicePref = '';
 
       async function populateMics() {
         const devs = await window.recallos?.listAudioDevices?.();
@@ -451,22 +451,28 @@
       }
 
       async function startRecording() {
-        if (!recordingStream) {
+        const wantScreen = !!capScreenEl?.checked;
+        const wantMic = !!capMicEl?.checked;
+        if (!wantScreen && !wantMic) { alert('Both screen and mic capture are disabled. Enable at least one.'); return; }
+        if (!recordingStream && wantScreen) {
           try { await ensureScreenStream(); } catch (e) { alert('No screen source available. Try Refresh Sources or Request Screen Capture.'); return; }
         }
         // Build a combined stream: screen video + optional mic audio
         let mixedStream = new MediaStream();
-        recordingStream.getVideoTracks().forEach(t => mixedStream.addTrack(t));
+        if (wantScreen && recordingStream) {
+          recordingStream.getVideoTracks().forEach(t => mixedStream.addTrack(t));
+        }
         try {
-          const sel = micSelect.value;
-          const mic = await navigator.mediaDevices.getUserMedia({ audio: sel ? { deviceId: sel } : true, video: false });
-          mic.getAudioTracks().forEach(t => mixedStream.addTrack(t));
+          if (wantMic) {
+            const sel = micSelect.value || micDevicePref;
+            const mic = await navigator.mediaDevices.getUserMedia({ audio: sel ? { deviceId: sel } : true, video: false });
+            mic.getAudioTracks().forEach(t => mixedStream.addTrack(t));
+          }
         } catch {}
 
   const opts = { mimeType: 'video/webm;codecs=vp9,opus' };
-        try { mediaRecorder = new MediaRecorder(recordingStream, opts); } catch { mediaRecorder = new MediaRecorder(recordingStream); }
-        // If we successfully mixed, prefer recording the mixed stream
-        try { mediaRecorder = new MediaRecorder(mixedStream, opts); } catch {}
+        // If we successfully mixed, prefer recording the mixed stream; else fall back
+        try { mediaRecorder = new MediaRecorder(mixedStream, opts); } catch { try { mediaRecorder = new MediaRecorder(mixedStream); } catch {} }
 
     let lastChunkStart = Date.now();
         mediaRecorder.ondataavailable = async (e) => {
@@ -478,12 +484,13 @@
       lastChunkStart = Date.now();
             const roleSel = document.getElementById('mic-role');
             const audio_role = roleSel ? roleSel.value : 'unknown';
-            await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: 'video', codec: 'webm', ext: 'webm', audio_role });
+            const isAudioOnly = !wantScreen && wantMic;
+            await window.recallos?.saveChunk?.(arrayBuf, { startedAt, durationMs, type: isAudioOnly ? 'audio' : 'video', codec: 'webm', ext: 'webm', audio_role });
           } catch (err) {
             console.error('saveChunk failed', err);
           }
         };
-  mediaRecorder.onstart = async () => { recStatus.textContent = 'Recording...'; document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
+  mediaRecorder.onstart = async () => { recStatus.textContent = 'Recording...'; if (privacyEnabled) document.getElementById('rec-badge').style.display='inline-block'; await window.recallos?.setRecordingIndicator?.(true); };
   mediaRecorder.onstop = async () => { recStatus.textContent = 'Stopped.'; document.getElementById('rec-badge').style.display='none'; await window.recallos?.setRecordingIndicator?.(false); };
   mediaRecorder.onpause = async () => { isPaused = true; recStatus.textContent = 'Paused'; };
   mediaRecorder.onresume = async () => { isPaused = false; recStatus.textContent = 'Recording...'; };
@@ -521,27 +528,7 @@
         (document.getElementById('rec-resume')).disabled = true;
       });
 
-      // OCR language management
-      document.getElementById('ocr-lang-apply').addEventListener('click', async () => {
-        const sel = (document.getElementById('ocr-lang')).value;
-        try {
-          const res = await window.recallos?.ensureOcrLanguage?.(sel);
-          alert(res?.ok ? `OCR language set to ${sel}` : `Failed to set OCR language: ${res?.error || 'unknown'}`);
-        } catch (e) {
-          alert('Failed to set OCR language: ' + (e?.message || e));
-        }
-      });
-
-      // STT model management
-      document.getElementById('stt-model-apply').addEventListener('click', async () => {
-        const sel = (document.getElementById('stt-model')).value;
-        try {
-          const res = await window.recallos?.setSttModel?.(sel);
-          alert(res?.ok ? `STT model set to ${sel}` : `Failed to set STT model: ${res?.error || 'unknown'}`);
-        } catch (e) {
-          alert('Failed to set STT model: ' + (e?.message || e));
-        }
-      });
+  // Settings actions moved to Settings window
 
       // Bind the preview stream to be used for recording too
   (async () => {
@@ -655,6 +642,20 @@
         });
         observer.observe(cont, { childList: true, subtree: true });
   await populateMics();
+  // Apply initial settings and wire events
+  try {
+    const s = await window.recallos?.getSettings?.();
+    // Capture toggles
+    try { capScreenEl.checked = String(s?.capture_screen || 'on') !== 'off'; capMicEl.checked = String(s?.capture_mic || 'on') !== 'off'; } catch {}
+    // Mic pref
+    micDevicePref = s?.mic_device_id || '';
+    const opt = Array.from(micSelect.options).find(o => o.value === micDevicePref); if (opt) micSelect.value = micDevicePref;
+  } catch {}
+
+  // Settings-related handlers removed (now in Settings window)
+  byId('cap-screen')?.addEventListener('change', async () => { await set('capture_screen', byId('cap-screen').checked ? 'on' : 'off'); });
+  byId('cap-mic')?.addEventListener('change', async () => { await set('capture_mic', byId('cap-mic').checked ? 'on' : 'off'); });
+  micSelect?.addEventListener('change', async () => { micDevicePref = micSelect.value; await set('mic_device_id', micDevicePref); });
       })();
 
       // --- Search wiring ---
@@ -681,6 +682,7 @@
           (rows||[]).forEach(r => {
             const item = document.createElement('div');
             item.style.border = '1px solid #ddd'; item.style.padding = '6px'; item.style.borderRadius = '4px';
+            item.dataset.row = JSON.stringify(r);
             const meta = document.createElement('div'); meta.style.fontSize = '12px'; meta.style.color = '#555';
             const appText = (r.app_name || r.app_bundle) ? ` • ${r.app_name || r.app_bundle}${r.window_title ? ` — “${String(r.window_title).slice(0,60)}”` : ''}` : '';
             meta.textContent = `${r.type} • t=${Math.floor(r.ts_ms/1000)}s${appText}`;
@@ -714,6 +716,23 @@
       document.getElementById('search-run').addEventListener('click', () => runSearch(true));
       document.getElementById('search-next').addEventListener('click', () => { searchOffset += searchLimit; runSearch(); });
       document.getElementById('search-prev').addEventListener('click', () => { searchOffset = Math.max(0, searchOffset - searchLimit); runSearch(); });
+      async function exportResults(format) {
+        try {
+          // Collect current rendered rows to avoid re-query differences
+          const rows = Array.from(document.querySelectorAll('#search-results > div')).map(div => {
+            try { return JSON.parse(div.dataset.row || 'null'); } catch { return null; }
+          }).filter(Boolean);
+          if (!rows.length) { alert('No results on this page to export.'); return; }
+          const dir = await window.recallos?.chooseDirectory?.();
+          if (!dir?.ok || !dir.path) return;
+          const filename = `recallos-search-${Date.now()}.${format}`;
+          const outPath = `${dir.path}/${filename}`;
+          const res = await window.recallos?.exportResults?.(rows, outPath, format);
+          if (res?.ok) alert(`Exported ${res.count} row(s) to ${res.path}`); else alert(`Export failed: ${res?.error||'unknown'}`);
+        } catch (e) { alert('Export failed.'); }
+      }
+      document.getElementById('export-json').addEventListener('click', () => exportResults('json'));
+      document.getElementById('export-csv').addEventListener('click', () => exportResults('csv'));
 
       // Populate app suggestions for search filter
       (async () => {
@@ -732,63 +751,7 @@
         } catch {}
       })();
 
-      // --- Per-app defaults wiring ---
-      async function loadAppDefaults() {
-        const s = await window.recallos?.getSettings?.();
-        let obj = {};
-        try { obj = s?.app_opt_in_defaults ? JSON.parse(s.app_opt_in_defaults) : {}; } catch { obj = {}; }
-        const cont = document.getElementById('app-list');
-        cont.innerHTML = '';
-        const keys = Object.keys(obj).sort();
-        if (keys.length === 0) { cont.innerHTML = '<div style="color:#666;">No per-app defaults set.</div>'; return; }
-        keys.forEach(k => {
-          const row = document.createElement('div');
-          row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center';
-          const key = document.createElement('code'); key.textContent = k; key.style.flex = '1';
-          const val = document.createElement('span'); val.textContent = obj[k] === 'off' ? 'Do not capture' : 'Capture'; val.style.color = '#555';
-          const del = document.createElement('button'); del.textContent = 'Remove';
-          del.addEventListener('click', async () => {
-            delete obj[k];
-            await window.recallos?.setSetting?.('app_opt_in_defaults', JSON.stringify(obj));
-            await loadAppDefaults();
-          });
-          row.appendChild(key); row.appendChild(val); row.appendChild(del);
-          cont.appendChild(row);
-        });
-      }
-      document.getElementById('app-add').addEventListener('click', async () => {
-        const s = await window.recallos?.getSettings?.();
-        let obj = {};
-        try { obj = s?.app_opt_in_defaults ? JSON.parse(s.app_opt_in_defaults) : {}; } catch { obj = {}; }
-        const key = (document.getElementById('app-key')).value.trim();
-        const def = (document.getElementById('app-default')).value;
-        if (!key) { alert('Enter a bundle ID or exe name'); return; }
-        obj[key] = def === 'off' ? 'off' : 'on';
-        await window.recallos?.setSetting?.('app_opt_in_defaults', JSON.stringify(obj));
-        (document.getElementById('app-key')).value = '';
-        await loadAppDefaults();
-      });
-      loadAppDefaults();
-
-      // App rename and current app helper
-      (async () => {
-        try {
-          const cur = await window.recallos?.getCurrentApp?.();
-          const el = document.getElementById('curr-app');
-          if (cur?.ok && cur.current && el) {
-            el.textContent = `${cur.current.display_name} (${cur.current.bundle_or_exe}) — "${(cur.current.window_title||'').slice(0,64)}"`;
-            (document.getElementById('app-rename-bundle')).value = cur.current.bundle_or_exe;
-          }
-        } catch {}
-      })();
-      document.getElementById('app-rename').addEventListener('click', async () => {
-        const bundle = (document.getElementById('app-rename-bundle')).value.trim();
-        const name = (document.getElementById('app-rename-name')).value.trim();
-        if (!bundle) { alert('Enter a bundle/exe'); return; }
-        const res = await window.recallos?.renameApp?.(bundle, name);
-        if (!res?.ok) alert('Rename failed: ' + (res?.error || 'unknown'));
-        (document.getElementById('app-rename-name')).value = '';
-      });
+  // Per-app Defaults moved to Settings window
     </script>
   </body>
 </html>

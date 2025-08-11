@@ -25,7 +25,7 @@
 - [x] [T-016] Add FFmpeg binary management (per-OS prebuilt binaries or dynamic download on first run)
 - [x] [T-017] Add Tesseract OCR binaries + language data (`eng` by default; allow user to add more)
 - [x] [T-018] Add Whisper.cpp binaries; select default model (e.g., `ggml-base.en.bin`); support model folder
-- [ ] [T-019] Add optional `node-ffi-napi` or native module wrappers if needed for platform APIs
+- [x] [T-019] Add optional `node-ffi-napi` or native module wrappers if needed for platform APIs
 - [x] [T-020] Create a `bin/` manager that resolves correct binary path per-OS and verifies SHA256 checksums
 - [x] [T-021] Implement first-run binary presence check + download with progress UI and resume
 - [x] [T-022] Add `models/` directory for Whisper models with integrity checks
@@ -90,20 +90,20 @@
 - [x] [T-071] Support “me” vs “others” tagging
 - [x] [T-072] Insert transcript lines into `transcripts` and `fts_content`
 - [x] [T-073] Expose model selection in settings; ensure/download on apply
-- [ ] [T-074] Implement GPU acceleration detection (Metal/CUDA/ROCm)
-- [ ] [T-075] Add diarization toggle if supported
+- [x] [T-074] Implement GPU acceleration detection (Metal/CUDA/ROCm)
+- [x] [T-075] Add diarization toggle if supported
 - [x] [T-076] Handle muted segments and silence detection
 
 ## Phase 8 — Application & Window Tracking
 - [x] [T-077] macOS: Implement app/window tracking via AppleScript
-- [ ] [T-078] Windows: Implement tracking via Win32 APIs
-- [ ] [T-079] Linux: Implement tracking for X11 and Wayland
+- [x] [T-078] Windows: Implement tracking via Win32 APIs
+- [x] [T-079] Linux: Implement tracking for X11 and Wayland
 - [x] [T-080] Sample active app/window periodically and merge segments
 - [x] [T-081] Write segments into `activity_segments` linked to timespan
 - [x] [T-082] Provide mapping UI from executable/bundle → friendly name
 
 ## Phase 9 — Calendar Integration
-- [ ] [T-083] Provide local ICS file import for calendar events
+- [x] [T-083] Provide local ICS file import for calendar events — Added ICS import entry point (UI+IPC); staging only. Parsing and de-dupe follow in T-084.
 - [ ] [T-084] Parse events into `events` table; de-duplicate
 - [ ] [T-085] UI toggle to show calendar overlays on timeline
 - [ ] [T-086] Add native calendar integrations (later)
@@ -134,29 +134,43 @@
 - [ ] [T-107] Keyboard navigation: jump hits, change playback speed
 - [ ] [T-108] Error UI for missing chunk files
 
-## Phase 12 — Settings & Controls
-- [x] [T-109] Theme preference persisted across sessions
-- [ ] [T-110] Data directory selector
-- [ ] [T-111] Passphrase change + rekey for SQLCipher
-- [ ] [T-112] Retention policy settings
-- [ ] [T-113] Capture toggles and device selectors
-- [ ] [T-114] OCR cadence and language packs settings
-- [ ] [T-115] STT model selection and performance presets
-- [x] [T-116] App inclusion/exclusion list with enforcement
-- [ ] [T-117] On-screen privacy indicator always visible
-- [ ] [T-118] Backup/export options
-- [ ] [T-119] Start-on-login and background-minimize options
-- [ ] [T-120] Telemetry settings
+## Phase 12 — Settings Window Consolidation
+- [x] [T-191] Create dedicated Settings window with tabs (General, Capture, Storage, Calendar, Security, Analytics, Export, Apps)
+- [x] [T-192] Move General settings (theme, start on login, privacy indicator)
+- [x] [T-193] Move Capture settings (OCR cadence/lang ensure, STT model and threads)
+- [x] [T-194] Move Storage settings (data directory selector, retention save/run)
+- [x] [T-195] Add Calendar tab scaffolding and wiring (show/hide calendar overlays, ICS import entry point) — aligns with Phase 9
+- [x] [T-196] Move Security settings (SQLCipher rekey; disable when unavailable)
+- [x] [T-197] Move Analytics settings (telemetry usage/errors; opt-in)
+- [x] [T-198] Add Export tools to Settings (backup snapshot; time range export with optional media)
+- [x] [T-199] Add Apps tab (per-app capture defaults add/update/remove; app rename UI)
+- [x] [T-200] Add “Settings…” entry point in top bar; IPC to open/focus Settings window
+- [x] [T-201] Remove legacy settings UI from main page
+- [x] [T-202] Update documentation/screenshots to reflect Settings window and tabs
 
-## Phase 13 — Export & Import Tools
-- [ ] [T-121] Export search results as JSON/CSV
-- [ ] [T-122] Export selected time range with related data
+## Phase 13 — Settings & Controls
+- [x] [T-109] Theme preference persisted across sessions
+- [x] [T-110] Data directory selector
+- [x] [T-111] Passphrase change + rekey for SQLCipher
+- [x] [T-112] Retention policy settings
+- [x] [T-113] Capture toggles and device selectors
+- [x] [T-114] OCR cadence and language packs settings
+- [x] [T-115] STT model selection and performance presets
+- [x] [T-116] App inclusion/exclusion list with enforcement
+- [x] [T-117] On-screen privacy indicator always visible
+ - [x] [T-118] Backup/export options
+- [x] [T-119] Start-on-login and background-minimize options
+ - [x] [T-120] Telemetry settings
+
+## Phase 14 — Export & Import Tools
+- [x] [T-121] Export search results as JSON/CSV
+- [x] [T-122] Export selected time range with related data
 - [ ] [T-123] Export “my voice only” dataset
 - [ ] [T-124] Export keyframes + OCR text as static HTML snapshot
 - [ ] [T-125] Import tool to re-index from exported bundle
 - [ ] [T-126] Verify exports preserve encryption status
 
-## Phase 14 — Performance & Reliability
+## Phase 15 — Performance & Reliability
 - [ ] [T-127] Implement rolling logs with levels and UI viewer
 - [ ] [T-128] Throttle OCR/STT workers based on CPU load
 - [ ] [T-129] Use hardware-accelerated decoding/encoding when available
@@ -169,7 +183,7 @@
 - [ ] [T-136] Integration tests across OSes
 - [ ] [T-137] Load tests with synthetic data
 
-## Phase 15 — Privacy, Security, and UX Safeguards
+## Phase 16 — Privacy, Security, and UX Safeguards
 - [ ] [T-138] Prominent “Recording Active” indicator
 - [ ] [T-139] Global hotkey to pause all capture
 - [ ] [T-140] Redaction rules before indexing
@@ -180,7 +194,7 @@
 - [ ] [T-145] Threat model documentation
 - [ ] [T-146] Clear consent language
 
-## Phase 16 — Cross-Platform Packaging & Distribution
+## Phase 17 — Cross-Platform Packaging & Distribution
 - [ ] [T-147] Configure `electron-builder` targets
 - [ ] [T-148] Bundle binaries and models with builds
 - [ ] [T-149] Code signing documentation and CI secrets
@@ -189,7 +203,7 @@
 - [ ] [T-152] Minimal system requirements page
 - [ ] [T-153] Smoke-test installers on all OSes
 
-## Phase 17 — Documentation & Onboarding
+## Phase 18 — Documentation & Onboarding
 - [ ] [T-154] Update `README.md` with screenshots/gifs
 - [ ] [T-155] Add “Architecture Overview” doc with diagrams
 - [ ] [T-156] Write “First Run Guide”
@@ -201,13 +215,13 @@
 - [ ] [T-162] Add example datasets
 - [ ] [T-163] Add issue labels and roadmap board
 
-## Phase 18 — Analytics & Activity Statistics
+## Phase 19 — Analytics & Activity Statistics
 - [ ] [T-164] Build SQL views for activity stats
 - [ ] [T-165] Implement simple charts in UI
 - [ ] [T-166] Add filters for charts
 - [ ] [T-167] Export charts as PNG/CSV
 
-## Phase 19 — Advanced Search & Quality of Life
+## Phase 20 — Advanced Search & Quality of Life
 - [ ] [T-168] Add proximity search
 - [ ] [T-169] Add “related moments” suggestions
 - [ ] [T-170] Saved search library with pinning
@@ -215,7 +229,7 @@
 - [ ] [T-172] Quick in-player text find
 - [ ] [T-173] Batch delete by filter
 
-## Phase 20 — Optional Nice-to-Haves
+## Phase 21 — Optional Nice-to-Haves
 - [ ] [T-174] GPU-accelerated Whisper builds
 - [ ] [T-175] Multi-language OCR packs
 - [ ] [T-176] Local NAS backup integration

@@ -19,15 +19,28 @@ declare global {
   listAudioDevices: () => Promise<Array<{ deviceId: string; label: string }>>;
   setRecordingIndicator: (active: boolean) => Promise<{ ok: boolean; error?: string }>;
   getMoment: (payload: { chunk_id: number; ts_ms: number }) => Promise<{ ok: true; path: string; absMs: number } | { ok: false; error: string }>;
+  openSettings: () => Promise<{ ok: boolean; error?: string }>;
   getSavedSearches: () => Promise<{ ok: boolean; searches?: Record<string, string>; error?: string }>;
   saveSearch: (name: string, query: string) => Promise<{ ok: boolean; error?: string }>;
   deleteSavedSearch: (name: string) => Promise<{ ok: boolean; error?: string }>;
   ensureOcrLanguage: (lang: string) => Promise<{ ok: boolean; res?: any; error?: string }>;
   setSttModel: (name: string) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  setSqlPassphrase: (pass: string) => Promise<{ ok: boolean; error?: string }>;
+  getLoginItem: () => Promise<{ ok: boolean; openAtLogin?: boolean; error?: string }>;
+  setLoginItem: (openAtLogin: boolean) => Promise<{ ok: boolean; error?: string }>;
+  runRetentionCleanup: () => Promise<{ ok: boolean; deleted?: number; error?: string }>;
+  runBackup: (destDir: string, opts?: { includeManifest?: boolean }) => Promise<{ ok: boolean; path?: string; files?: number; error?: string }>;
+  exportResults: (rows: any[], outPath: string, format?: 'json'|'csv') => Promise<{ ok: boolean; path?: string; count?: number; error?: string }>;
+  exportRange: (destDir: string, from: number, to: number, opts?: { includeMedia?: boolean }) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  // Calendar
+  importIcs: () => Promise<{ cancelled: boolean; imported?: number }>;
   // Apps
   listApps: () => Promise<{ ok: boolean; apps?: Array<{ id: number; bundle_or_exe: string; display_name: string }>; error?: string }>;
   renameApp: (bundle: string, display_name: string) => Promise<{ ok: boolean; error?: string }>;
   getCurrentApp: () => Promise<{ ok: boolean; current?: { bundle_or_exe: string; display_name: string; window_title: string } | null; error?: string }>;
+      // STT caps
+      sttCaps: () => Promise<{ ok: boolean; diarization?: boolean; error?: string }>;
+      supportsDiarization: () => Promise<boolean>;
     };
   }
 }

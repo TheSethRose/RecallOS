@@ -16,6 +16,15 @@ contextBridge.exposeInMainWorld('recallos', {
   openScreenRecordingSettings: async () => ipcRenderer.invoke('recallos:perm:screen:openSettings'),
   chooseDirectory: async () => ipcRenderer.invoke('recallos:dialog:chooseDir'),
   getSqlFeatures: async () => ipcRenderer.invoke('recallos:sql:features'),
+  setSqlPassphrase: async (pass: string) => ipcRenderer.invoke('recallos:sql:rekey', { pass }),
+  getLoginItem: async () => ipcRenderer.invoke('recallos:login:get'),
+  setLoginItem: async (openAtLogin: boolean) => ipcRenderer.invoke('recallos:login:set', { openAtLogin }),
+  runRetentionCleanup: async () => ipcRenderer.invoke('recallos:retention:run'),
+  runBackup: async (destDir: string, opts?: { includeManifest?: boolean }) => ipcRenderer.invoke('recallos:backup:run', { destDir, includeManifest: !!opts?.includeManifest }),
+  exportResults: async (rows: any[], outPath: string, format: 'json'|'csv' = 'json') => ipcRenderer.invoke('recallos:export:results', { rows, outPath, format }),
+  exportRange: async (destDir: string, from: number, to: number, opts?: { includeMedia?: boolean }) => ipcRenderer.invoke('recallos:export:range', { destDir, from, to, includeMedia: !!opts?.includeMedia }),
+  // Calendar
+  importIcs: async () => ipcRenderer.invoke('recallos:calendar:importIcs'),
   listCaptureSources: async (types: Array<'screen' | 'window'> = ['screen', 'window']) => {
     const sources = await desktopCapturer.getSources({ types, thumbnailSize: { width: 320, height: 200 } });
     return sources.map(s => ({
@@ -49,6 +58,7 @@ contextBridge.exposeInMainWorld('recallos', {
     ipcRenderer.invoke('recallos:saveChunk', { buffer, ...meta }),
   setRecordingIndicator: async (active: boolean) => ipcRenderer.invoke('recallos:recording:set', { active }),
   getMoment: async (payload: { chunk_id: number; ts_ms: number }) => ipcRenderer.invoke('recallos:getMoment', payload),
+  openSettings: async () => ipcRenderer.invoke('recallos:ui:openSettings'),
   // Saved searches
   getSavedSearches: async () => ipcRenderer.invoke('recallos:saved:get'),
   saveSearch: async (name: string, query: string) => ipcRenderer.invoke('recallos:saved:put', { name, query }),
@@ -57,6 +67,16 @@ contextBridge.exposeInMainWorld('recallos', {
   ensureOcrLanguage: async (lang: string) => ipcRenderer.invoke('recallos:ocr:ensureLang', { lang }),
   // STT settings
   setSttModel: async (name: string) => ipcRenderer.invoke('recallos:stt:setModel', { name }),
+// STT caps
+sttCaps: async () => ipcRenderer.invoke('recallos:stt:caps'),
+supportsDiarization: async () => {
+  try {
+    const r = await ipcRenderer.invoke('recallos:stt:caps');
+    return !!(r && r.ok && r.diarization);
+  } catch {
+    return false;
+  }
+},
   // Apps
   listApps: async () => ipcRenderer.invoke('recallos:apps:list'),
   renameApp: async (bundle: string, display_name: string) => ipcRenderer.invoke('recallos:apps:rename', { bundle, display_name }),

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, systemPreferences, shell, session, desktopCapturer, dialog } from 'electron';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { ensureAllBinaries } from '../bin/manager';
 import { ensureWhisperModel, ensureWhisperModelByName } from '../models/manager';
 import { ensureTesseractLang } from '../ocr/lang';
@@ -15,7 +15,9 @@ import { resolveTesseract, resolveWhisper } from '../bin/manager';
 import { execFile, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { initLogger, logError } from '../util/log';
+import { initLogger, logError, logWarn, logInfo } from '../util/log';
+import { detectGpuBackend, whisperGpuArgs } from '../util/gpu';
+import { getActiveAppWindow as getActiveWin } from '../native';
 const errStr = (e: any) => {
   try {
     if (!e) return 'unknown';
@@ -27,6 +29,8 @@ const errStr = (e: any) => {
 };
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
+
+const supportsDiarization = (): boolean => process.env.RECALLOS_STT_DIARIZATION_SUPPORTED === '1';
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -90,6 +94,13 @@ app.whenReady().then(async () => {
   try { logError(`FFmpeg capability detection failed: ${errStr(e)}`); } catch {}
   }
 
+  // Detect GPU capabilities for whisper.cpp (best-effort)
+  try {
+    const caps = detectGpuBackend();
+    console.log('GPU:', caps.backend, caps.reason || '');
+    (app as any)._recallosGpuCaps = caps;
+  } catch {}
+ 
   // Open application database (encrypted if SQLCipher is linked and passphrase provided)
   try {
     const baseDir = app.getPath('userData');
@@ -98,7 +109,9 @@ app.whenReady().then(async () => {
   const { applied } = runMigrations(db);
   if (applied.length) console.log('DB migrations applied:', applied);
     // Keep DB reference on app for longevity; close on exit
-    (app as any)._recallosDb = db;
+  (app as any)._recallosDb = db;
+    try { (app as any)._recallosDbPath = path; } catch {}
+  try { (app as any)._recallosDbEncrypted = !!encrypted; (app as any)._recallosCipherVersion = cipherVersion || null; } catch {}
     // Load configured OCR language (default 'eng') and ensure language pack
     try {
       const row = db.prepare?.('SELECT value FROM settings WHERE key = ?').get('ocr_lang');
@@ -112,6 +125,33 @@ app.whenReady().then(async () => {
       console.warn('Failed to ensure configured OCR lang:', e);
       (app as any)._recallosOcrLang = 'eng';
     }
+    // Load OCR cadence (fps) setting with default 0.2
+    try {
+      const row = db.prepare?.('SELECT value FROM settings WHERE key = ?').get('ocr_fps');
+      const fps = Math.max(0.05, Math.min(5, Number(row?.value || 0.2))) || 0.2;
+      (app as any)._recallosOcrFps = fps;
+    } catch {
+      (app as any)._recallosOcrFps = 0.2;
+    }
+    // Retention cleanup helper (shared by scheduler and IPC)
+    const doRetentionCleanup = async (): Promise<number> => {
+      try {
+        const row = db.prepare?.('SELECT value FROM settings WHERE key = ?').get('retention_days');
+        const days = Math.max(0, Math.min(3650, Number(row?.value || 0)));
+        if (!days) return 0;
+        const cutoff = Math.floor(Date.now() / 1000) - (days * 86400);
+        const oldChunks = db.prepare?.('SELECT id, path FROM media_chunks WHERE started_at < ?').all(cutoff) || [];
+        let deleted = 0;
+        for (const c of oldChunks) {
+          try { if (c.path) await fsp.unlink(String(c.path)).catch(() => {}); } catch {}
+          try { db.prepare?.('DELETE FROM ocr_blocks WHERE chunk_id = ?').run(c.id); } catch {}
+          try { db.prepare?.('DELETE FROM transcripts WHERE chunk_id = ?').run(c.id); } catch {}
+          try { db.prepare?.('DELETE FROM media_chunks WHERE id = ?').run(c.id); deleted++; } catch {}
+        }
+        return deleted;
+      } catch { return 0; }
+    };
+
     // Start background job processor (simple inline handler for now)
     const q = new JobQueue(db);
     const stopProcessor = await startProcessor(db, 1, 1000, async (job) => {
@@ -120,9 +160,10 @@ app.whenReady().then(async () => {
           const chunkId = Number(job.payload?.chunk_id);
           const path = String(job.payload?.path || '');
           if (!chunkId || !path) return true;
-          // Extract low-frequency frames (e.g., 0.2 fps) to process OCR
+          // Extract frames at configured low frequency (default 0.2 fps) to process OCR
           const outDir = join(tmpdir(), `recallos-frames-${chunkId}-${Date.now()}`);
-          const ex = await extractFrames(path, outDir, 0.2);
+          const fps = (app as any)._recallosOcrFps || 0.2;
+          const ex = await extractFrames(path, outDir, fps);
           if (!ex.ok) return true; // skip OCR if extraction failed
           // List frames and enqueue ocr:frame jobs
           const frames = (await require('node:fs').promises.readdir(outDir)).filter((n: string) => n.endsWith('.png'));
@@ -199,13 +240,52 @@ app.whenReady().then(async () => {
           } catch {}
           const whisper = resolveWhisper();
           if (!whisper) return true;
+
+          // Diarization setting and capability (no-op if unsupported)
+          try {
+            const dbLocal = (app as any)._recallosDb;
+            const row = dbLocal?.prepare?.('SELECT value FROM settings WHERE key = ?').get('stt_diarization');
+            const enabled = String(row?.value || 'off') === 'on';
+            if (enabled) {
+              if (supportsDiarization()) {
+                try { (app as any)._recallosSttDiarization = true; } catch {}
+              } else {
+                if (!(app as any)._recallosWarnedDiarUnsupported) {
+                  try { logWarn('Diarization requested but not supported. Set RECALLOS_STT_DIARIZATION_SUPPORTED=1 to enable gating; proceeding without diarization.'); } catch {}
+                  try { (app as any)._recallosWarnedDiarUnsupported = true; } catch {}
+                }
+              }
+            }
+          } catch {}
+
           // Run whisper.cpp to SRT with timestamps; prefer base.en model ensured earlier
           const modelRow = (app as any)._recallosModelPath || null;
           const modelPath = modelRow?.path || join(process.cwd(), 'models', 'ggml-base.en.bin');
           const baseOut = join(tmpdir(), `recallos-stt-${chunkId}-${Date.now()}`);
           const srtPath = `${baseOut}.srt`;
           try {
-            await execFileAsync(whisper, ['-m', modelPath, '-f', wavPath, '-osrt', '-of', baseOut, '-pp'], { maxBuffer: 10 * 1024 * 1024 });
+            // Optional performance tuning (threads)
+            let threads: number | null = null;
+            try {
+              const dbLocal = (app as any)._recallosDb;
+              const r = dbLocal?.prepare?.('SELECT value FROM settings WHERE key = ?').get('stt_threads');
+              threads = r?.value ? Number(r.value) : null;
+            } catch {}
+            const args = ['-m', modelPath, '-f', wavPath, '-osrt', '-of', baseOut, '-pp'] as string[];
+            if (threads && threads > 0 && Number.isFinite(threads)) { args.push('-t', String(Math.max(1, Math.min(16, Math.floor(threads))))); }
+            // GPU offload (uses detection with optional DB/env override)
+            try {
+              const caps = (app as any)._recallosGpuCaps || detectGpuBackend();
+              let ngl: number | null = null;
+              try {
+                const dbLocal2 = (app as any)._recallosDb;
+                const r2 = dbLocal2?.prepare?.('SELECT value FROM settings WHERE key = ?').get('stt_ngl');
+                ngl = r2?.value ? Number(r2.value) : null;
+              } catch {}
+              const gpu = whisperGpuArgs(caps, ngl);
+              if (gpu.length) args.push(...gpu);
+            } catch {}
+            await execFileAsync(whisper, args, { maxBuffer: 10 * 1024 * 1024 });
           } catch (e) {
             // If SRT failed, fall back to txt without timing
             try { logError(`Whisper SRT generation failed (chunk=${chunkId}): ${errStr(e)}`); } catch {}
@@ -267,6 +347,14 @@ app.whenReady().then(async () => {
       }
     });
     (app as any)._recallosStopProcessor = stopProcessor;
+
+    // Schedule periodic retention cleanup (every 6h)
+    try {
+      const runAndReschedule = async () => { try { await doRetentionCleanup(); } catch {} };
+      setTimeout(runAndReschedule, 5_000);
+      const t = setInterval(runAndReschedule, 6 * 3600 * 1000);
+      (app as any)._recallosRetentionTimer = t;
+    } catch {}
   } catch (e) {
     console.error('Failed to open app database:', e);
   }
@@ -393,6 +481,14 @@ app.whenReady().then(async () => {
       return { ok: false, error: e?.message || String(e) };
     }
   });
+  // STT capability: diarization support (env-gated)
+  ipcMain.handle('recallos:stt:caps', async () => {
+    try {
+      return { ok: true, diarization: supportsDiarization() };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
   // Simple directory chooser for first-run setup
   ipcMain.handle('recallos:dialog:chooseDir', async () => {
     try {
@@ -401,6 +497,72 @@ app.whenReady().then(async () => {
       return { ok: true, path: res.filePaths[0] };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Calendar: import .ics files (stage locally only; no DB writes)
+  ipcMain.handle('recallos:calendar:importIcs', async () => {
+    try {
+      const res = await dialog.showOpenDialog({
+        properties: ['openFile', 'multiSelections'],
+        filters: [{ name: 'Calendar', extensions: ['ics'] }],
+      });
+      if (res.canceled || !res.filePaths?.length) return { cancelled: true };
+
+      const db = (app as any)._recallosDb;
+
+      // Resolve base data directory (settings.data_dir overrides userData)
+      let baseDir = app.getPath('userData');
+      try {
+        const row = db?.prepare?.('SELECT value FROM settings WHERE key = ?').get('data_dir');
+        if (row?.value && typeof row.value === 'string' && row.value.length > 0) baseDir = row.value;
+      } catch {}
+
+      const importsDir = join(baseDir, 'calendar', 'imports');
+      try { await fsp.mkdir(importsDir, { recursive: true }); } catch {}
+
+      const MAX = 10 * 1024 * 1024; // 10 MB
+      let imported = 0;
+
+      for (const src of res.filePaths) {
+        try {
+          const orig = basename(src);
+
+          // Validate extension
+          if (!/\.ics$/i.test(orig)) {
+            try { logWarn(`ICS import skipped (bad extension): ${orig}`); } catch {}
+            continue;
+          }
+
+          // Validate size
+          try {
+            const st = await fsp.stat(src);
+            if (!st || st.size > MAX) {
+              try { logWarn(`ICS import skipped (too large): ${orig} (${st?.size || 0} bytes)`); } catch {}
+              continue;
+            }
+          } catch {
+            try { logWarn(`ICS import stat failed: ${orig}`); } catch {}
+            continue;
+          }
+
+          // Copy to staged imports with unique name
+          const fname = `${Date.now()}-${Math.random().toString(36).slice(2,8)}-${orig}`;
+          const dest = join(importsDir, fname);
+          await fsp.copyFile(src, dest);
+          imported++;
+
+          // No DB writes or queue jobs in T-083 scope
+          try { logInfo(`ICS staged: ${dest}`); } catch {}
+        } catch (e: any) {
+          try { logError(`ICS import failed: ${e?.message || String(e)}`); } catch {}
+        }
+      }
+
+      return { cancelled: false, imported };
+    } catch (e: any) {
+      try { logError(`ICS import IPC failed: ${e?.message || String(e)}`); } catch {}
+      return { cancelled: true };
     }
   });
   ipcMain.handle('recallos:enqueueJob', async (_evt, payload: any) => {
@@ -452,7 +614,196 @@ app.whenReady().then(async () => {
     const db = (app as any)._recallosDb;
     try {
       db.prepare?.('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(payload.key, payload.value);
+      // Apply select settings immediately in-memory
+      try {
+        if (payload.key === 'ocr_fps') {
+          const v = Math.max(0.05, Math.min(5, Number(payload.value)));
+          (app as any)._recallosOcrFps = Number.isFinite(v) ? v : (app as any)._recallosOcrFps;
+        } else if (payload.key === 'privacy_indicator') {
+          // If disabling, clear indicators
+          const enabled = String(payload.value || 'on') !== 'off';
+          if (!enabled) {
+            try { if (process.platform === 'darwin' && app.dock && app.dock.setBadge) app.dock.setBadge(''); } catch {}
+            try {
+              const win = BrowserWindow.getAllWindows()[0];
+              if (win && !win.isDestroyed()) win.setTitle('RecallOS');
+            } catch {}
+          }
+        }
+      } catch {}
       return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Backup/export: copy DB and settings (and optional media manifest) to destination folder
+  ipcMain.handle('recallos:backup:run', async (_evt, payload: any) => {
+    try {
+      const destDir = String(payload?.destDir || '').trim();
+      const includeManifest = !!payload?.includeManifest;
+      if (!destDir) throw new Error('no-dest');
+      const db = (app as any)._recallosDb;
+      const dbPath: string = (app as any)._recallosDbPath || join(app.getPath('userData'), 'recallos.sqlite3');
+      // Create timestamped backup directory
+      const d = new Date();
+      const ts = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}${String(d.getSeconds()).padStart(2,'0')}`;
+      const outDir = join(destDir, `recallos-backup-${ts}`);
+      try { await fsp.mkdir(outDir, { recursive: true }); } catch {}
+      // Snapshot DB using VACUUM INTO for consistency; fallback to raw copy
+      const dbOut = join(outDir, 'recallos.sqlite3');
+      try {
+        const escaped = dbOut.replace(/'/g, "''");
+        db.prepare?.(`VACUUM INTO '${escaped}'`).run();
+      } catch {
+        await fsp.copyFile(dbPath, dbOut);
+      }
+      // Export settings
+      let settingsObj: Record<string, string> = {};
+      try {
+        const rows = db.prepare?.('SELECT key, value FROM settings').all() || [];
+        for (const r of rows) settingsObj[r.key] = r.value;
+      } catch {}
+      await fsp.writeFile(join(outDir, 'settings.json'), JSON.stringify(settingsObj, null, 2), 'utf8');
+      // Write metadata.json (encryption info)
+      try {
+        const meta = {
+          exported_at: new Date().toISOString(),
+          type: 'backup',
+          db_encrypted: !!(app as any)._recallosDbEncrypted,
+          cipher_version: (app as any)._recallosCipherVersion || null
+        };
+        await fsp.writeFile(join(outDir, 'metadata.json'), JSON.stringify(meta, null, 2), 'utf8');
+      } catch {}
+      // Optional: media chunks manifest
+      let files = 2;
+      if (includeManifest) {
+        try {
+          const rows = db.prepare?.('SELECT id, path, started_at, duration_ms, type FROM media_chunks ORDER BY started_at').all() || [];
+          const manifest: any[] = [];
+          for (const r of rows) {
+            let exists = false, size: number | null = null;
+            try { const st = await fsp.stat(String(r.path)); exists = st.isFile(); size = st.size; } catch {}
+            manifest.push({ id: r.id, path: r.path, started_at: r.started_at, duration_ms: r.duration_ms, type: r.type, exists, size });
+          }
+          await fsp.writeFile(join(outDir, 'chunks-manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+          files++;
+        } catch {}
+      }
+      return { ok: true, path: outDir, files };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Export current search results (renderer supplies rows), format json|csv, write to file
+  ipcMain.handle('recallos:export:results', async (_evt, payload: any) => {
+    try {
+      const inputRows = Array.isArray(payload?.rows) ? payload.rows : [];
+      const format = (payload?.format === 'csv') ? 'csv' : 'json';
+      const outPath = String(payload?.outPath || '').trim();
+      const columns = ['rowid','content','type','chunk_id','ts_ms','app_bundle','app_name','window_title'];
+      const meta = {
+        exported_at: new Date().toISOString(),
+        count: inputRows.length,
+        columns
+      };
+      if (!outPath) throw new Error('no-outpath');
+      ensureParentDir(outPath);
+      const rows = inputRows.map((r: any) => ({
+        rowid: r.rowid ?? '',
+        content: r.content ?? r.snippet ?? '',
+        type: r.type ?? '',
+        chunk_id: r.chunk_id ?? '',
+        ts_ms: r.ts_ms ?? '',
+        app_bundle: r.app_bundle ?? '',
+        app_name: r.app_name ?? '',
+        window_title: r.window_title ?? ''
+      }));
+      if (format === 'json') {
+        const data = { meta, rows };
+        await fsp.writeFile(outPath, JSON.stringify(data, null, 2), 'utf8');
+      } else {
+        const header = columns.join(',') + '\n';
+        const esc = (v: any) => {
+          if (v == null) return '';
+          const s = String(v);
+          if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+          return s;
+        };
+        const lines = [header];
+        for (const r of rows) {
+          lines.push([
+            esc(r.rowid), esc(r.content), esc(r.type), esc(r.chunk_id), esc(r.ts_ms), esc(r.app_bundle), esc(r.app_name), esc(r.window_title)
+          ].join(',') + '\n');
+        }
+        await fsp.writeFile(outPath, lines.join(''), 'utf8');
+      }
+      return { ok: true, path: outPath, count: rows.length };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Export selected time range with related data; optionally copy media files
+  ipcMain.handle('recallos:export:range', async (_evt, payload: any) => {
+    try {
+      const destDir = String(payload?.destDir || '').trim();
+      const from = Number(payload?.from || 0) || 0; // epoch seconds
+      const to = Number(payload?.to || 0) || 0; // epoch seconds
+      const includeMedia = !!payload?.includeMedia;
+      if (!destDir) throw new Error('no-dest');
+      if (!from || !to || to < from) throw new Error('invalid-range');
+      const db = (app as any)._recallosDb;
+      // Create output dir
+      const outDir = join(destDir, `recallos-range-${from}-${to}`);
+      try { await fsp.mkdir(outDir, { recursive: true }); } catch {}
+      // Query media chunks in range
+      const chunks = db.prepare?.('SELECT id, path, type, started_at, duration_ms, codec, width, height, sample_rate, channel_layout FROM media_chunks WHERE started_at BETWEEN ? AND ? ORDER BY started_at').all(from, to) || [];
+      const chunkIds = chunks.map((c: any) => c.id);
+      // Related OCR and transcripts
+      const ocr = chunkIds.length ? (db.prepare?.(`SELECT id, chunk_id, ts_ms, text FROM ocr_blocks WHERE chunk_id IN (${chunkIds.map(()=>'?').join(',')}) ORDER BY chunk_id, ts_ms`).all(...chunkIds) || []) : [];
+      const trs = chunkIds.length ? (db.prepare?.(`SELECT id, chunk_id, ts_ms, text, speaker FROM transcripts WHERE chunk_id IN (${chunkIds.map(()=>'?').join(',')}) ORDER BY chunk_id, ts_ms`).all(...chunkIds) || []) : [];
+      // Activity segments overlapping range and related apps
+      const segs = db.prepare?.('SELECT * FROM activity_segments WHERE (started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)) OR (started_at BETWEEN ? AND ?) ORDER BY started_at').all(to, from, from, to) || [];
+      const appIds = Array.from(new Set(segs.map((s: any) => s.app_id).filter(Boolean)));
+      const apps = appIds.length ? (db.prepare?.(`SELECT * FROM apps WHERE id IN (${appIds.map(()=>'?').join(',')})`).all(...appIds) || []) : [];
+      // Write JSON files
+      await fsp.writeFile(join(outDir, 'media_chunks.json'), JSON.stringify(chunks, null, 2), 'utf8');
+      await fsp.writeFile(join(outDir, 'ocr_blocks.json'), JSON.stringify(ocr, null, 2), 'utf8');
+      await fsp.writeFile(join(outDir, 'transcripts.json'), JSON.stringify(trs, null, 2), 'utf8');
+      await fsp.writeFile(join(outDir, 'activity_segments.json'), JSON.stringify(segs, null, 2), 'utf8');
+      await fsp.writeFile(join(outDir, 'apps.json'), JSON.stringify(apps, null, 2), 'utf8');
+      // Settings snapshot
+      try {
+        const rows = db.prepare?.('SELECT key, value FROM settings').all() || [];
+        const settingsObj: Record<string, string> = {};
+        for (const r of rows) settingsObj[r.key] = r.value;
+        await fsp.writeFile(join(outDir, 'settings.json'), JSON.stringify(settingsObj, null, 2), 'utf8');
+      } catch {}
+      // Metadata
+      const meta = {
+        exported_at: new Date().toISOString(),
+        type: 'range',
+        from, to,
+        counts: { chunks: chunks.length, ocr: ocr.length, transcripts: trs.length, segments: segs.length, apps: apps.length },
+        db_encrypted: !!(app as any)._recallosDbEncrypted,
+        cipher_version: (app as any)._recallosCipherVersion || null
+      };
+      await fsp.writeFile(join(outDir, 'metadata.json'), JSON.stringify(meta, null, 2), 'utf8');
+      // Optionally copy media
+      if (includeMedia && chunks.length) {
+        const mediaDir = join(outDir, 'media');
+        try { await fsp.mkdir(mediaDir, { recursive: true }); } catch {}
+        for (const c of chunks) {
+          try {
+            const base = String(c.path || '').split('/').pop() || `chunk-${c.id}`;
+            const out = join(mediaDir, `${c.id}-${base}`);
+            await fsp.copyFile(String(c.path), out);
+          } catch {}
+        }
+      }
+      return { ok: true, path: outDir };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e) };
     }
@@ -1010,20 +1361,200 @@ app.whenReady().then(async () => {
   ipcMain.handle('recallos:recording:set', async (_evt, payload: any) => {
     try {
       const active = !!payload?.active;
-      if (process.platform === 'darwin' && app.dock && app.dock.setBadge) {
-        app.dock.setBadge(active ? 'REC' : '');
-      } else {
-        const win = BrowserWindow.getAllWindows()[0];
-        if (win && !win.isDestroyed()) {
-          const base = 'RecallOS';
-          win.setTitle(active ? `${base} • REC` : base);
+      // Respect privacy indicator setting
+      try {
+        const db = (app as any)._recallosDb;
+        const row = db?.prepare?.('SELECT value FROM settings WHERE key = ?').get('privacy_indicator');
+        const enabled = String(row?.value || 'on') !== 'off';
+        if (enabled) {
+          if (process.platform === 'darwin' && app.dock && app.dock.setBadge) {
+            app.dock.setBadge(active ? 'REC' : '');
+          } else {
+            const win = BrowserWindow.getAllWindows()[0];
+            if (win && !win.isDestroyed()) {
+              const base = 'RecallOS';
+              win.setTitle(active ? `${base} • REC` : base);
+            }
+          }
+        } else {
+          // Clear any active indicator if disabled
+          if (process.platform === 'darwin' && app.dock && app.dock.setBadge) app.dock.setBadge('');
+          const win = BrowserWindow.getAllWindows()[0];
+          if (win && !win.isDestroyed()) win.setTitle('RecallOS');
         }
-      }
+      } catch {}
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e) };
     }
   });
+
+  // Start-on-login settings
+  ipcMain.handle('recallos:login:get', async () => {
+    try {
+      const info = (app as any).getLoginItemSettings ? (app as any).getLoginItemSettings() : { openAtLogin: false };
+      return { ok: true, openAtLogin: !!info.openAtLogin };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+  ipcMain.handle('recallos:login:set', async (_evt, payload: any) => {
+    try {
+      const enable = !!payload?.openAtLogin;
+      if ((app as any).setLoginItemSettings) (app as any).setLoginItemSettings({ openAtLogin: enable, openAsHidden: true });
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Retention cleanup
+  ipcMain.handle('recallos:retention:run', async () => {
+    try {
+      const deleted = await (async () => {
+        try {
+          const db = (app as any)._recallosDb;
+          // Inline reuse of helper via closure
+          const row = db.prepare?.('SELECT value FROM settings WHERE key = ?').get('retention_days');
+          const days = Math.max(0, Math.min(3650, Number(row?.value || 0)));
+          if (!days) return 0;
+          const cutoff = Math.floor(Date.now() / 1000) - (days * 86400);
+          const oldChunks = db.prepare?.('SELECT id, path FROM media_chunks WHERE started_at < ?').all(cutoff) || [];
+          let deleted = 0;
+          for (const c of oldChunks) {
+            try { if (c.path) await fsp.unlink(String(c.path)).catch(() => {}); } catch {}
+            try { db.prepare?.('DELETE FROM ocr_blocks WHERE chunk_id = ?').run(c.id); } catch {}
+            try { db.prepare?.('DELETE FROM transcripts WHERE chunk_id = ?').run(c.id); } catch {}
+            try { db.prepare?.('DELETE FROM media_chunks WHERE id = ?').run(c.id); deleted++; } catch {}
+          }
+          return deleted;
+        } catch { return 0; }
+      })();
+      return { ok: true, deleted };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // SQLCipher rekey (change passphrase)
+  ipcMain.handle('recallos:sql:rekey', async (_evt, payload: any) => {
+    try {
+      const newPass = String(payload?.pass || '').trim();
+      if (!newPass) throw new Error('invalid-pass');
+      const feats = detectSqlFeatures();
+      if (!feats.sqlcipher) throw new Error('sqlcipher-not-linked');
+      const db = (app as any)._recallosDb;
+      // Apply rekey. Note: app must be restarted with new RECALLOS_PASSPHRASE to reopen.
+      db.pragma?.(`rekey = '${newPass.replace(/'/g, "''")}'`);
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  // Windows: foreground app/window tracking sampler (Phase 8)
+  try {
+    if (process.platform === 'win32') {
+      const db = (app as any)._recallosDb;
+      const sample = async () => {
+        try {
+          const info = await getActiveWin();
+          const appKey = (info.appId || (info.exe ? basename(info.exe) : '') || 'unknown').slice(0, 256);
+          const windowTitle = String(info.title || '').slice(0, 512);
+          if (!appKey) return;
+          let appId: number | null = null;
+          try {
+            const row = db.prepare?.('SELECT id FROM apps WHERE bundle_or_exe = ?').get(appKey);
+            if (row?.id) {
+              appId = row.id;
+            } else {
+              const display = (info.exe ? basename(info.exe) : appKey) || appKey;
+              db.prepare?.('INSERT INTO apps(bundle_or_exe, display_name) VALUES(?, ?)').run(appKey, display);
+              const idRow = db.prepare?.('SELECT last_insert_rowid() AS id').get();
+              appId = idRow?.id ?? null;
+            }
+          } catch {}
+          if (appId == null) return;
+          const now = Math.floor(Date.now() / 1000);
+          try {
+            const last = db.prepare?.('SELECT id, app_id, window_title, started_at, ended_at FROM activity_segments ORDER BY id DESC LIMIT 1').get();
+            if (last && last.app_id === appId && String(last.window_title || '') === String(windowTitle || '')) {
+              if (last.ended_at != null) {
+                db.prepare?.('UPDATE activity_segments SET ended_at = NULL WHERE id = ?').run(last.id);
+              }
+            } else {
+              if (last && last.ended_at == null) {
+                db.prepare?.('UPDATE activity_segments SET ended_at = ? WHERE id = ?').run(now, last.id);
+              }
+              db.prepare?.('INSERT INTO activity_segments(app_id, window_title, started_at, ended_at) VALUES(?, ?, ?, NULL)').run(appId, windowTitle, now);
+            }
+          } catch {}
+        } catch {}
+      };
+      setTimeout(sample, 1000);
+      const timer = setInterval(sample, 1500);
+      (app as any)._recallosAppTrackTimer = timer;
+      app.on('before-quit', () => {
+        try {
+          const db = (app as any)._recallosDb;
+          const now = Math.floor(Date.now() / 1000);
+          db.prepare?.('UPDATE activity_segments SET ended_at = ? WHERE ended_at IS NULL').run(now);
+        } catch {}
+      });
+    }
+  } catch {}
+
+  // Linux: foreground app/window tracking sampler (Phase 8)
+  try {
+    if (process.platform === 'linux') {
+      const db = (app as any)._recallosDb;
+      const sample = async () => {
+        try {
+          const info = await getActiveWin();
+          const appKey = (info.appId || (info.exe ? basename(info.exe) : '') || 'unknown').slice(0, 256);
+          const windowTitle = String(info.title || '').slice(0, 512);
+          if (!appKey) return;
+          let appId: number | null = null;
+          try {
+            const row = db.prepare?.('SELECT id FROM apps WHERE bundle_or_exe = ?').get(appKey);
+            if (row?.id) {
+              appId = row.id;
+            } else {
+              const display = (info.exe ? basename(info.exe) : appKey) || appKey;
+              db.prepare?.('INSERT INTO apps(bundle_or_exe, display_name) VALUES(?, ?)').run(appKey, display);
+              const idRow = db.prepare?.('SELECT last_insert_rowid() AS id').get();
+              appId = idRow?.id ?? null;
+            }
+          } catch {}
+          if (appId == null) return;
+          const now = Math.floor(Date.now() / 1000);
+          try {
+            const last = db.prepare?.('SELECT id, app_id, window_title, started_at, ended_at FROM activity_segments ORDER BY id DESC LIMIT 1').get();
+            if (last && last.app_id === appId && String(last.window_title || '') === String(windowTitle || '')) {
+              if (last.ended_at != null) {
+                db.prepare?.('UPDATE activity_segments SET ended_at = NULL WHERE id = ?').run(last.id);
+              }
+            } else {
+              if (last && last.ended_at == null) {
+                db.prepare?.('UPDATE activity_segments SET ended_at = ? WHERE id = ?').run(now, last.id);
+              }
+              db.prepare?.('INSERT INTO activity_segments(app_id, window_title, started_at, ended_at) VALUES(?, ?, ?, NULL)').run(appId, windowTitle, now);
+            }
+          } catch {}
+        } catch {}
+      };
+      setTimeout(sample, 1000);
+      const timer = setInterval(sample, 1500);
+      (app as any)._recallosAppTrackTimer = timer;
+      app.on('before-quit', () => {
+        try {
+          const db = (app as any)._recallosDb;
+          const now = Math.floor(Date.now() / 1000);
+          db.prepare?.('UPDATE activity_segments SET ended_at = ? WHERE ended_at IS NULL').run(now);
+        } catch {}
+      });
+    }
+  } catch {}
 
   // macOS: foreground app/window tracking sampler (Phase 8)
   try {
@@ -1163,11 +1694,38 @@ app.whenReady().then(async () => {
       return { ok: false, error: e?.message || String(e) };
     }
   });
+
+  // Settings window management
+  ipcMain.handle('recallos:ui:openSettings', async () => {
+    try {
+      const key = '_recallosSettingsWin';
+      let win: BrowserWindow | undefined = (app as any)[key];
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore();
+        win.focus();
+        return { ok: true };
+      }
+      win = new BrowserWindow({
+        width: 900,
+        height: 700,
+        resizable: true,
+        title: 'Settings — RecallOS',
+        webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true },
+      });
+      (app as any)[key] = win;
+      win.on('closed', () => { try { (app as any)[key] = undefined; } catch {} });
+      win.loadFile(join(__dirname, '../renderer/settings.html'));
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
 });
 
 app.on('window-all-closed', () => {
   try { const stop = (app as any)._recallosStopProcessor as undefined | (() => void); if (stop) stop(); } catch {}
   try { const db = (app as any)._recallosDb; if (db && typeof db.close === 'function') db.close(); } catch {}
+  try { const t = (app as any)._recallosRetentionTimer as any; if (t) clearInterval(t); } catch {}
   try { const t = (app as any)._recallosAppTrackTimer as any; if (t) clearInterval(t); } catch {}
   if (process.platform !== 'darwin') app.quit();
 });
